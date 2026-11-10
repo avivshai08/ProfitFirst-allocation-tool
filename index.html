@@ -169,7 +169,7 @@ async function dbSaveClient(id){
 async function dbCreateClient(name,passHash,subEnd){try{const rows=await sbPost('clients',{name,pass_hash:passHash,accounts:DEFA(),last_income:'',email:'',reminder_enabled:false,active:true,subscription_end:subEnd||null,smart_alloc:true});return rows&&rows[0]?rows[0].id:null;}catch(e){console.warn(e);return null;}}
 async function dbDeleteClient(id){try{await sbDelete('clients','?id=eq.'+id);}catch(e){console.warn(e);}}
 async function dbSaveAllocation(clientId,entry){try{await sbPost('allocations',{client_id:clientId,date:entry.date,date_num:entry.dateNum,time:entry.time,income:entry.income,results:entry.results});}catch(e){console.warn(e);}}
-async function dbUpdateAdminPw(hash){try{await sbPatch('settings','?id=eq.1',{admin_hash:hash});}catch(e){console.warn(e);}}
+async function dbUpdateAdminPw(hash){const rows=await sbPatch('settings','?id=eq.1',{admin_hash:hash});if(!rows||!rows.length)throw new Error('settings row not updated');return rows;}
 async function dbUpdateClientPw(id,hash){try{await sbPatch('clients','?id=eq.'+id,{pass_hash:hash});}catch(e){console.warn(e);}}
 const COLORS=['#1D9E75','#378ADD','#D85A30','#D4537E','#7F77DD','#BA7517','#639922','#E24B4A','#888780'];
 let custN=0,curId=null,curAdminClientId=null,activeTab='alloc';
@@ -381,6 +381,32 @@ function goAdmin(){
   show('login');
 }
 function doAdminLogin(){if(H(document.getElementById('apw').value)===state.adminHash)renderAdmin();else document.getElementById('aerr').style.display='block';}
+
+function changeAdminPw(){
+  const cur=document.getElementById('acp').value;
+  const np=document.getElementById('anp').value;
+  const np2=document.getElementById('anp2').value;
+  const msg=document.getElementById('apmsg');
+  function showMsg(text,ok){msg.className=ok?'suc':'err';msg.textContent=text;msg.style.display='block';}
+  if(H(cur)!==state.adminHash){showMsg('הסיסמה הנוכחית שגויה',false);return;}
+  if(!np||np.length<6){showMsg('הסיסמה החדשה חייבת להכיל לפחות 6 תווים',false);return;}
+  if(np!==np2){showMsg('הסיסמאות אינן תואמות',false);return;}
+  const btn=document.querySelector('#s-admin button[onclick="changeAdminPw()"]');
+  if(btn){btn.textContent='שומר...';btn.disabled=true;}
+  const hash=H(np);
+  dbUpdateAdminPw(hash).then(function(){
+    state.adminHash=hash;sv();
+    document.getElementById('acp').value='';
+    document.getElementById('anp').value='';
+    document.getElementById('anp2').value='';
+    showMsg('✓ סיסמת המנהל עודכנה',true);
+  }).catch(function(e){
+    console.warn('changeAdminPw:',e);
+    showMsg('שגיאה בשמירת הסיסמה — הסיסמה לא שונתה. נסה שוב.',false);
+  }).finally(function(){
+    if(btn){btn.textContent='עדכן סיסמה';btn.disabled=false;}
+  });
+}
 
 function renderAdmin(){
   renderAdminTab('clients');
