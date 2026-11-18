@@ -29,26 +29,26 @@ that matches no client gets the signup screen instead.
 1. **Inspect** — done (2026-11-18): 11 clients, 76 allocations; uuid ids; three "anon full access" policies; one daily job calling `smart-processor` with the public key.
 2. **Backup** — run `01_backup.sql`; also Table Editor → Export each of `clients`, `allocations`, `settings` as CSV and keep the files.
 3. **Google sign-in (you)** — create a **new Google Cloud project** for the tool (its own name and logo on Google's sign-in screen, separate from MoneySystem):
-   - OAuth consent screen: External; app name; support email; home page = the tool's address; privacy policy = `<tool address>/privacy.html`; terms = `<tool address>/terms.html`; publish.
+   - OAuth consent screen: External; app name; support email; home page `https://app.profitfirst.finance`; privacy policy `https://app.profitfirst.finance/privacy.html`; terms `https://app.profitfirst.finance/terms.html`; authorized domain `profitfirst.finance`; publish.
    - Credentials → OAuth client ID → Web application. Authorized redirect URI: `https://wmqgzcxwukyiahsxtupf.supabase.co/auth/v1/callback`.
    - Supabase → Authentication → Providers → Google: paste client ID and secret, enable. Turn **off** the Email provider.
-   - Supabase → Authentication → URL Configuration: Site URL = the tool's address; Redirect URLs: the tool's address and `http://localhost:8080`.
+   - Supabase → Authentication → URL Configuration: Site URL `https://app.profitfirst.finance`; Redirect URLs: `https://app.profitfirst.finance/**` and `http://localhost:8080/**`.
 4. **Database additions** — run `02_prepare.sql`, then `04_billing.sql`. The live site keeps working.
 5. **Billing function (you, I can guide)** — Supabase → Edge Functions → Deploy a new function → via editor, name `pf-billing`, with the two files from `functions/pf-billing/`. Secrets (Edge Functions → Secrets):
    - `SUMIT_COMPANY_ID`, `SUMIT_API_KEY` — the same SUMIT account as MoneySystem (SUMIT → Developers → API keys);
-   - `PF_SUMIT_ITEM_ID` — the ID of the tool's catalog item in SUMIT (only that item's standing orders count, so a MoneySystem subscription never opens the tool and is never cancelled by it);
+   - `PF_SUMIT_ITEM_ID` — the ID of the tool's catalog item in SUMIT (only that item's standing orders count, so a MoneySystem subscription never opens the tool and is never cancelled by it). To find it, run in PowerShell with your company ID and API key: `$b=@{Credentials=@{CompanyID=<מספר חברה>;APIKey='<API key>'};Paging=@{StartIndex=0;PageSize=100}}|ConvertTo-Json -Depth 3; (Invoke-RestMethod -Method Post -Uri https://api.sumit.co.il/accounting/incomeitems/list/ -ContentType 'application/json' -Body $b).Data.IncomeItems | Format-Table ID,Name,Price`;
    - `PF_CRON_SECRET` — any long random text (also goes into `05_billing_schedule.sql`).
-6. **SUMIT (you)** — on the tool's payment page/item set both "כתובת לניווט לאחר ביצוע התשלום" and "כתובת לניווט לאחר קבלת הזמנה ללא חיוב" to the tool's address.
+6. **SUMIT (you)** — on the tool's payment page/item set both "כתובת לניווט לאחר ביצוע התשלום" and "כתובת לניווט לאחר קבלת הזמנה ללא חיוב" to `https://app.profitfirst.finance/`.
 7. **Check `smart-processor`** — the daily 07:00 job calls it with the public key. If it reads `clients` with that key, it stops working at the cutover. Send me its code (Edge Functions → smart-processor → Code), and `bright-function`'s, before step 10.
 8. **Try it on prod without switching anything** — in the repo folder run `npx serve -l 8080`, open `http://localhost:8080`:
    - sign in with aviv.shai08@gmail.com → admin screen with all clients;
    - sign in with a second Google account → signup → SUMIT page → pay with a real card (no charge in the first 30 days) → back on `http://localhost:8080` press "כבר שילמתי — בדוק שוב" → you are in. Make an allocation; then profile → ביטול מנוי. Delete this test client in admin afterwards.
    The old site keeps working throughout.
-9. **Clients without a usable email** — set their אימייל לכניסה in the new admin screen (on localhost) to the Google email they will use.
+9. **Clients without a usable email** — the five listed on 2026-11-18 are test/inactive clients, so nothing to do; any client added before the cutover needs a Google email as אימייל לכניסה.
 10. **Cutover**, same hour: run `01_backup.sql` again with a new date suffix; publish the new site on Netlify (`index.html`, `terms.html`, `privacy.html`); run `03_cutover.sql`; run `05_billing_schedule.sql`.
 11. **Tell clients**: "from now on, sign in with the Google account of <their email>". In admin, מחובר ל־Google appears as each one signs in.
 
-**Undo the cutover:** `03_rollback.sql`, then re-publish the old `index.html` (commit `cd7fb41`). `select cron.unschedule('pf-billing-daily');` stops the daily check. No data is touched by any of these.
+**Undo the cutover:** `03_rollback.sql`, then re-publish the old `index.html` (commit `cd7fb41`: the live site of 2026-11-18 minus unused code, plus the admin password fix). `select cron.unschedule('pf-billing-daily');` stops the daily check. No data is touched by any of these.
 
 ## If a client cannot get in
 

@@ -96,11 +96,16 @@ function addMonth(iso: string) {
 
 /** After a cancellation: a month after the last payment, or the trial end; never before today. */
 export function paidUntil(items: RecurringItem[], today: string): string {
+  return [today, paidPeriodEnd(items) ?? today].sort().at(-1)!;
+}
+
+/** The end of the period paid for by the ended orders, or null if SUMIT gives no dates. */
+function paidPeriodEnd(items: RecurringItem[]): string | null {
   const ends = items
     .filter((item) => ENDED.includes(item.status))
     .map((item) => (item.previousBilling ? addMonth(item.previousBilling) : item.firstBilling))
     .filter((end): end is string => end !== null);
-  return [today, ...ends].sort().at(-1)!;
+  return ends.sort().at(-1) ?? null;
 }
 
 /** End dates are stored like the admin screen stores them: the last second of the day. */
@@ -116,8 +121,8 @@ type EndDates = { endDate: string | null; sumitEndDate: string | null };
 /**
  * An end date the app did not set (the admin's) is never changed. With no end date, a
  * failed charge gives PAYMENT_GRACE_DAYS more days; a cancellation ends access when the
- * paid period does; a later successful payment clears a date the app set. An end date
- * the app already set is otherwise left alone.
+ * paid period does; a later successful payment clears a date the app set. A date the app
+ * set after a cancellation only moves to a later paid-period end.
  * Dates are YYYY-MM-DD. Returns the new dates, or null for no change.
  */
 export function nextEndDates(current: EndDates, state: BillingState, items: RecurringItem[], today: string): EndDates | null {
@@ -132,9 +137,13 @@ export function nextEndDates(current: EndDates, state: BillingState, items: Recu
     return { endDate: end, sumitEndDate: end };
   }
   if (state === 'cancelled') {
-    // Once set, keep it: paidUntil() is never before today, so recomputing an end date
-    // that has passed would push it to "today" every day and access would never end.
-    if (appOwned) return null;
+    // A date the app set only moves to a later paid-period end (e.g. a grace date, then
+    // the user cancels), never to "today" again: paidUntil() is never before today, so
+    // recomputing a passed end date would renew it every morning and access would never end.
+    if (appOwned) {
+      const paidEnd = paidPeriodEnd(items);
+      return paidEnd !== null && paidEnd > current.endDate! ? { endDate: paidEnd, sumitEndDate: paidEnd } : null;
+    }
     const end = paidUntil(items, today);
     return { endDate: end, sumitEndDate: end };
   }
