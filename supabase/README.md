@@ -15,9 +15,9 @@ row (`clients.user_id`). From then on the link is by account, not by email.
 | 1 | Run `00_inspect.sql` (read-only, one result table) in Supabase → SQL Editor; send the results | You | No | — |
 | 2 | Run `01_backup.sql`; also export `clients`, `allocations`, `settings` as CSV and keep them | You | No | — |
 | 3 | Google Cloud: OAuth client (Web). Authorized redirect URI `https://wmqgzcxwukyiahsxtupf.supabase.co/auth/v1/callback`. Supabase → Authentication → Providers → Google: paste client ID/secret, enable. Turn **off** the Email provider. Authentication → URL Configuration: Site URL = the tool's address; add `http://localhost:8080` to Redirect URLs for step 5 | You | No | Disable the provider |
-| 4 | Put your Google email in the last line of `02_prepare.sql`, uncomment it, run the file | You | No (adds empty columns and functions only) | — |
+| 4 | Run `02_prepare.sql` (it also makes aviv.shai08@gmail.com the admin) | You | No (adds empty columns and functions only) | — |
 | 5 | Try the new page on prod data without switching anything: run `npx serve -l 8080` in the repo folder, open `http://localhost:8080`, sign in with Google → admin screen. Create a test client with a second Google email of yours, sign in with it, make an allocation | You (I can walk you through it) | No — the old site keeps working | Delete the test client |
-| 6 | Fix the clients listed by query 5 of `00_inspect.sql`: set their אימייל לכניסה in the new admin screen | You | No | — |
+| 6 | Fix the clients listed under "needs login email" in `00_inspect.sql`: set their אימייל לכניסה in the new admin screen | You | No | — |
 | 7 | **Cutover**, same hour: run `01_backup.sql` again (new date suffix), publish the new `index.html` at the tool's address, run `03_cutover.sql` | You + me | Yes: old password login stops, Google login starts | `03_rollback.sql` + re-publish the old `index.html` (commit `cd7fb41`) |
 | 8 | Tell clients: "from now on, sign in with the Google account of <their email>". Watch the admin list: מחובר ל־Google appears as each one signs in | You | — | — |
 
