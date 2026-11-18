@@ -148,7 +148,7 @@ async function sendConfirmation(clientId,entry){
   if(p.notifyAlloc===false){console.warn('Notifications disabled');return;}
   try{
     const resp=await fetch(EDGE_EMAIL,{method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+SB_KEY},
+      headers:{...await sbHeaders(),'Content-Type':'application/json'},
       body:JSON.stringify({type:'confirmation',to:p.email,clientName:p.name,income:entry.income,results:entry.results,date:entry.dateNum||entry.date})
     });
     const data=await resp.json();
