@@ -20,6 +20,7 @@ that matches no client gets the signup screen instead.
 | `02_prepare.sql` | Adds empty `user_id`, `login_email`; admin list (aviv.shai08@gmail.com); sign-in functions | No |
 | `04_billing.sql` | Adds empty billing columns; signup function | No |
 | `functions/pf-billing/` | Edge Function: confirms payments, cancels, daily SUMIT check | No |
+| `03a_signed_in_rules.sql` | Adds the rules for Google-signed-in users (admin sees all, client only own) next to the open ones, so the new site can be tried before the switch | No |
 | `03_cutover.sql` | Switches access rules to per-user (the moment of the switch) | **Yes** |
 | `03_rollback.sql` | Puts the access rules back exactly as before 03 | Yes (back to old) |
 | `05_billing_schedule.sql` | Daily run of the SUMIT check | No |
@@ -45,7 +46,7 @@ that matches no client gets the signup screen instead.
    - `RESEND_API_KEY` — a **new** Resend key (Resend → API Keys → Create). The old one was pasted in chat on 2026-11-18; delete it in Resend after step 10.
 6. **SUMIT (you)** — on the tool's payment page/item set both "כתובת לניווט לאחר ביצוע התשלום" and "כתובת לניווט לאחר קבלת הזמנה ללא חיוב" to `https://app.profitfirst.finance/`.
 7. **Reminders** — replace the code of `smart-processor` with `functions/smart-processor/index.ts` and deploy, then at once run `06_reminders_schedule.sql` (not around 07:00 UTC). Works with the old site too, and keeps working after the cutover.
-8. **Try it on prod without switching anything** — in the repo folder run `npx serve -l 8080`, open `http://localhost:8080`:
+8. **Try it on prod without switching anything** — run `03a_signed_in_rules.sql` first (without it a signed-in admin sees no clients, because before the cutover only the public key has access rules). Then double-click "Test new Profit First site" on the Desktop (runs `tools/serve-local.cjs`) and use `http://localhost:8080`:
    - sign in with aviv.shai08@gmail.com → admin screen with all clients;
    - sign in with a second Google account → signup → SUMIT page → pay with a real card (no charge in the first 30 days) → back on `http://localhost:8080` press "כבר שילמתי — בדוק שוב" → you are in. Make an allocation; then profile → ביטול מנוי. Delete this test client in admin afterwards.
    The old site keeps working throughout.
