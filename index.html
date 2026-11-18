@@ -124,7 +124,22 @@ async function sbGet(t,p=''){const r=await fetch(SB_URL+'/rest/v1/'+t+p,{headers
 async function sbPost(t,b){const r=await fetch(SB_URL+'/rest/v1/'+t,{method:'POST',headers:{...await sbHeaders(),'Content-Type':'application/json','Prefer':'return=representation'},body:JSON.stringify(b)});if(!r.ok)throw new Error(await r.text());return r.json();}
 async function sbPatch(t,p,b){const r=await fetch(SB_URL+'/rest/v1/'+t+p,{method:'PATCH',headers:{...await sbHeaders(),'Content-Type':'application/json','Prefer':'return=representation'},body:JSON.stringify(b)});if(!r.ok)throw new Error(await r.text());return r.json();}
 async function sbDelete(t,p){const r=await fetch(SB_URL+'/rest/v1/'+t+p,{method:'DELETE',headers:await sbHeaders()});if(!r.ok)throw new Error(await r.text());return true;}
-async function sbRpc(fn){const r=await fetch(SB_URL+'/rest/v1/rpc/'+fn,{method:'POST',headers:{...await sbHeaders(),'Content-Type':'application/json'},body:'{}'});if(!r.ok)throw new Error(await r.text());return r.json();}
+async function sbRpc(fn,args){const r=await fetch(SB_URL+'/rest/v1/rpc/'+fn,{method:'POST',headers:{...await sbHeaders(),'Content-Type':'application/json'},body:JSON.stringify(args||{})});if(!r.ok)throw new Error(await r.text());return r.json();}
+
+// Online signup: SUMIT payment page (monthly standing order, first 30 days free) and the
+// server function that confirms payments and cancels (supabase/functions/pf-billing).
+const PAYMENT_URL='https://pay.sumit.co.il/8r3u23/x4oqsu/x4oqyg/payment/';
+const BILLING_FN=SB_URL+'/functions/v1/pf-billing';
+const PRICE_TEXT='25 ₪ + מע״מ לחודש · 30 הימים הראשונים ללא תשלום';
+async function billing(action){const r=await fetch(BILLING_FN,{method:'POST',headers:{...await sbHeaders(),'Content-Type':'application/json'},body:JSON.stringify({action})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j;}
+// Prefilled and tagged with our client id; SUMIT stores it on the customer, which is how
+// the billing function finds the payment (nothing in the return address is trusted).
+function paymentUrl(clientId,name,phone){
+  const u=new URL(PAYMENT_URL);
+  u.searchParams.set('name',name);u.searchParams.set('emailaddress',state.authEmail||'');u.searchParams.set('phone',phone||'');
+  u.searchParams.set('externalidentifier','pf-'+clientId);u.searchParams.set('customerexternalidentifier','pf-'+clientId);
+  return u.toString();
+}
 
 async function sendConfirmation(clientId,entry){
   const p=state.profiles[clientId];
@@ -148,7 +163,9 @@ function rowToProfile(r){
     email:r.email||'',businessName:r.business_name||'',reminderEnabled:r.reminder_enabled||false,reminderFrequency:r.reminder_frequency||'biweekly',
     reminderDay:r.reminder_day||'sunday',reminderDates:r.reminder_dates||'1,15',notifyAlloc:r.notify_alloc!==false,smartAlloc:r.smart_alloc!==false,
     subscriptionEnd:r.subscription_end||null,active:r.active!==false,createdAt:r.created_at||'',
-    loginEmail:r.login_email||'',linked:!!r.user_id,dbId:r.id,log:[]};
+    loginEmail:r.login_email||'',linked:!!r.user_id,dbId:r.id,log:[],
+    awaitingPayment:r.awaiting_payment===true,signupSource:r.signup_source||'',phone:r.phone||'',
+    sumitCustomerId:r.sumit_customer_id||'',cancelledAt:r.subscription_cancelled_at||null};
 }
 async function dbLoadClients(){
   try{
@@ -175,7 +192,7 @@ async function dbSaveClient(id){
     email:p.email||'',business_name:p.businessName||'',notify_alloc:p.notifyAlloc!==false,smart_alloc:p.smartAlloc!==false,
     reminder_enabled:p.reminderEnabled||false,reminder_frequency:p.reminderFrequency||'biweekly',
     reminder_day:p.reminderDay||'sunday',reminder_dates:p.reminderDates||'1,15',
-    subscription_end:p.subscriptionEnd||null,active:p.active!==false,login_email:p.loginEmail||null});}catch(e){console.warn('saveClient:',e);}
+    subscription_end:p.subscriptionEnd||null,active:p.active!==false,login_email:p.loginEmail||null,sumit_customer_id:p.sumitCustomerId||null});}catch(e){console.warn('saveClient:',e);}
 }
 async function dbCreateClient(name,loginEmail,subEnd){try{const rows=await sbPost('clients',{name,login_email:loginEmail,accounts:DEFA(),last_income:'',email:'',reminder_enabled:false,active:true,subscription_end:subEnd||null,smart_alloc:true});return rows&&rows[0]?rows[0].id:null;}catch(e){console.warn(e);return null;}}
 async function dbUnlinkClient(id){await sbPatch('clients','?id=eq.'+id,{user_id:null});}
@@ -300,7 +317,8 @@ function renderLand(msg){
 
 function renderCopyright(){
   const el=document.getElementById('copyright-note');
-  if(el)el.innerHTML='&copy; '+new Date().getFullYear()+' Bottom Line &mdash; Adding Value. כל הזכויות שמורות. אין להעתיק, לשכפל או להפיץ את הכלי ללא אישור בכתב.';
+  if(el)el.innerHTML='&copy; '+new Date().getFullYear()+' Bottom Line &mdash; Adding Value. כל הזכויות שמורות. אין להעתיק, לשכפל או להפיץ את הכלי ללא אישור בכתב.'
+    +'<br><a href="terms.html" style="color:#aaa;">תנאי שימוש</a> · <a href="privacy.html" style="color:#aaa;">מדיניות פרטיות</a>';
 }
 
 function renderSupport(){
@@ -340,14 +358,15 @@ async function enterSignedIn(session){
   try{
     if(await sbRpc('pf_is_admin')===true){await dbLoadClients();renderAdmin();return;}
     const res=await sbRpc('pf_claim_client');
-    if(!res||res.status!=='linked'){
-      renderLand(res&&res.status==='ambiguous'
-        ?'נמצא יותר מפרופיל אחד עם האימייל הזה — פנה למנהל.'
-        :'לא נמצא פרופיל עבור האימייל הזה — פנה למנהל ליצירת חשבון.');
-      return;
-    }
+    if(res&&res.status==='ambiguous'){renderLand('נמצא יותר מפרופיל אחד עם האימייל הזה — פנה למנהל.');return;}
+    if(!res||res.status!=='linked'){renderSignup(session);return;}
     curId=String(res.id);
-    const p=await dbLoadClient(curId);
+    let p=await dbLoadClient(curId);
+    if(p.awaitingPayment){
+      // Back from the payment page (or a later visit): ask SUMIT whether it went through.
+      try{if((await billing('confirm')).opened)p=await dbLoadClient(curId);}catch(e){console.warn('confirm:',e);}
+      if(p.awaitingPayment){renderAwaiting();return;}
+    }
     const expired=p.subscriptionEnd&&new Date(p.subscriptionEnd)<new Date();
     if(p.active===false||expired){renderLand('תקופת המנוי הסתיימה. לחידוש המנוי צור קשר עם Bottom Line.');return;}
     await dbLoadLog(curId);
@@ -356,6 +375,66 @@ async function enterSignedIn(session){
     console.warn('sign-in:',e);
     renderLand('שגיאה בטעינת החשבון. נסה שוב.');
   }
+}
+
+function escAttr(s){return String(s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');}
+
+// A Google account with no client profile: sign up and continue to the SUMIT payment page.
+function renderSignup(session){
+  const meta=(session&&session.user&&session.user.user_metadata)||{};
+  document.getElementById('s-land').innerHTML=
+    '<div class="card">'
+    +'<div class="lbl">הרשמה לכלי לחלוקת הכנסות</div>'
+    +'<div style="font-size:13px;color:#555;margin-bottom:12px;line-height:1.7;">'+PRICE_TEXT+'<br>ביטול בכל עת מתוך הגדרות הפרופיל.</div>'
+    +'<div style="font-size:12px;color:#888;margin-bottom:12px;">מחובר כ־<strong dir="ltr">'+state.authEmail+'</strong></div>'
+    +'<div class="ig"><label>שם מלא</label><input type="text" id="su-name" value="'+escAttr(meta.full_name||meta.name||'')+'" autocomplete="name"></div>'
+    +'<div class="ig"><label>טלפון נייד</label><input type="tel" id="su-phone" dir="ltr" placeholder="05X-XXXXXXX" autocomplete="tel"></div>'
+    +'<label style="display:flex;gap:8px;align-items:flex-start;font-size:12px;color:#555;margin:6px 0 12px;line-height:1.6;cursor:pointer;">'
+    +'<input type="checkbox" id="su-terms" style="width:16px;height:16px;margin-top:2px;flex-shrink:0;">'
+    +'<span>קראתי ואני מסכים/ה ל<a href="terms.html" target="_blank" style="color:var(--td);">תנאי השימוש</a> ול<a href="privacy.html" target="_blank" style="color:var(--td);">מדיניות הפרטיות</a></span></label>'
+    +'<div id="su-err" class="err" style="display:none;"></div>'
+    +'<button class="action-btn" id="su-go">המשך לתשלום</button>'
+    +'</div>'
+    +'<div class="card" style="background:#f9f9f9;border-color:#e8e8e8;text-align:center;font-size:12px;color:#666;line-height:1.8;">'
+    +'כבר לקוח/ה? ייתכן שנכנסת עם חשבון Google אחר.<br>'
+    +'<button style="font-size:12px;color:var(--td);background:none;border:none;cursor:pointer;font-weight:500;" onclick="signInGoogle()">כניסה עם חשבון Google אחר</button>'
+    +' · <button style="font-size:12px;color:#888;background:none;border:none;cursor:pointer;" onclick="signOut()">התנתק</button></div>';
+  show('land');
+  document.getElementById('su-go').addEventListener('click',async function(){
+    const name=document.getElementById('su-name').value.trim();
+    const phone=document.getElementById('su-phone').value.replace(/[^0-9]/g,'');
+    const err=document.getElementById('su-err');
+    const fail=t=>{err.style.display='block';err.textContent=t;};
+    err.style.display='none';
+    if(!name)return fail('נא למלא שם מלא');
+    if(!/^0\d{8,9}$/.test(phone))return fail('נא למלא מספר טלפון תקין');
+    if(!document.getElementById('su-terms').checked)return fail('יש לאשר את תנאי השימוש ומדיניות הפרטיות');
+    this.disabled=true;this.textContent='רגע...';
+    try{
+      const res=await sbRpc('pf_start_signup',{p_name:name,p_phone:phone});
+      if(res.status==='created'){location.href=paymentUrl(res.id,name,phone);return;}
+      if(res.status==='exists'){await enterSignedIn(session);return;}
+      fail(res.error==='phone'?'נא למלא מספר טלפון תקין':'נא לבדוק את הפרטים');
+    }catch(e){console.warn('signup:',e);fail('ההרשמה נכשלה. נסה שוב.');}
+    this.disabled=false;this.textContent='המשך לתשלום';
+  });
+}
+
+// Signed up but SUMIT has not confirmed a payment yet.
+function renderAwaiting(){
+  const p=gP();
+  document.getElementById('s-land').innerHTML=
+    '<div class="card">'
+    +'<div class="lbl">ההרשמה כמעט הושלמה</div>'
+    +'<div style="font-size:13px;color:#555;line-height:1.7;margin-bottom:12px;">עדיין לא התקבל אישור על הרשמה למנוי ('+PRICE_TEXT+').<br>אם כבר השלמת את התשלום, האישור יכול להתקבל תוך כמה דקות.</div>'
+    +'<button class="action-btn" id="aw-pay">המשך לתשלום</button>'
+    +'<div style="text-align:center;margin-top:8px;">'
+    +'<button style="font-size:12px;color:var(--td);background:none;border:none;cursor:pointer;font-weight:500;" id="aw-check">כבר שילמתי — בדוק שוב</button>'
+    +' · <button style="font-size:12px;color:#888;background:none;border:none;cursor:pointer;" onclick="signOut()">התנתק</button></div>'
+    +'</div>';
+  show('land');
+  document.getElementById('aw-pay').addEventListener('click',()=>{location.href=paymentUrl(curId,p.name,p.phone);});
+  document.getElementById('aw-check').addEventListener('click',async()=>{const{data}=await sb.auth.getSession();if(data.session)enterSignedIn(data.session);else renderLand();});
 }
 
 function renderAdmin(){
@@ -398,8 +477,8 @@ function renderAdminTab(tab){
       const p=state.profiles[id];
       const expired=p.subscriptionEnd&&new Date(p.subscriptionEnd)<now;
       const isActive=p.active!==false&&!expired;
-      const statusColor=isActive?'#1D9E75':'#E24B4A';
-      const statusLabel=isActive?'פעיל':'לא פעיל';
+      const statusColor=p.awaitingPayment?'#E8A020':isActive?'#1D9E75':'#E24B4A';
+      const statusLabel=p.awaitingPayment?'ממתין לתשלום':isActive?'פעיל':'לא פעיל';
       clientRows+=
         '<div style="display:flex;align-items:center;gap:10px;padding:12px;background:var(--color-background-primary);border:1px solid var(--color-border-tertiary);border-radius:12px;margin-bottom:8px;cursor:pointer;" class="adm-open-client" data-id="'+id+'">'
         +'<div class="av" style="background:'+avB[i%6]+';color:'+avF[i%6]+';flex-shrink:0;">'+ini(p.name)+'</div>'
@@ -499,8 +578,8 @@ function renderClientAdminTab(tab){
   }
 
   const isActive=computeStatus();
-  const statusColor=isActive?'#1D9E75':'#E24B4A';
-  const statusLabel=isActive?'פעיל':'לא פעיל';
+  const statusColor=p.awaitingPayment?'#E8A020':isActive?'#1D9E75':'#E24B4A';
+  const statusLabel=p.awaitingPayment?'ממתין לתשלום':isActive?'פעיל':'לא פעיל';
   const createdFmt=p.createdAt?new Date(p.createdAt).toLocaleDateString('he-IL'):'לא ידוע';
   const subEndFmt=p.subscriptionEnd?new Date(p.subscriptionEnd).toLocaleDateString('he-IL'):'ללא הגבלה';
   const subEndVal=p.subscriptionEnd?p.subscriptionEnd.substring(0,10):'';
@@ -541,6 +620,13 @@ function renderClientAdminTab(tab){
       +'</div>'
       +'<div class="ig"><label>תאריך סיום מנוי (ריק = ללא הגבלה)</label>'
       +'<input type="date" id="ca-sub-end" value="'+subEndVal+'" style="padding:8px 10px;font-size:13px;border:1px solid var(--br);border-radius:8px;width:100%;outline:none;"></div>'
+      // Billing: online signups are billed by SUMIT automatically; an admin-added client is
+      // checked daily only once its SUMIT customer number is entered.
+      +'<div style="font-size:12px;color:#555;margin-bottom:8px;line-height:1.8;">מקור: <strong>'+(p.signupSource==='self'?'הרשמה עצמית':'נוסף ע״י מנהל')+'</strong>'
+      +(p.phone?' · טלפון: <span dir="ltr">'+p.phone+'</span>':'')
+      +(p.cancelledAt?'<br>המנוי בוטל ע״י הלקוח ב־'+new Date(p.cancelledAt).toLocaleDateString('he-IL'):'')+'</div>'
+      +'<div class="ig"><label>'+(p.signupSource==='self'?'מספר לקוח SUMIT (רק אם התשלום נרשם על כרטיס לקוח קיים)':'מספר לקוח SUMIT (הוראת קבע; ריק = ניהול ידני)')+'</label>'
+      +'<input type="text" id="ca-sumit" dir="ltr" inputmode="numeric" value="'+(p.sumitCustomerId||'')+'"></div>'
       // Google sign-in
       +'<div class="lbl" style="margin:14px 0 8px;">כניסה עם Google</div>'
       +'<div style="font-size:12px;color:#555;margin-bottom:8px;">'+(p.linked?'✓ מחובר לחשבון Google':'טרם התחבר עם Google')+'</div>'
@@ -608,6 +694,8 @@ function renderClientAdminTab(tab){
       // Restore active if future date set
       if(!p.subscriptionEnd||new Date(p.subscriptionEnd)>new Date())p.active=true;
       p.loginEmail=document.getElementById('ca-login-email').value.trim();
+      const sumitFld=document.getElementById('ca-sumit');
+      if(sumitFld)p.sumitCustomerId=sumitFld.value.replace(/[^0-9]/g,'');
       sv();
       dbSaveClient(id).then(()=>{
         const msg=document.getElementById('ca-msg');
@@ -805,6 +893,43 @@ function buildProfileUI(container){
   document.getElementById('prf-notify').addEventListener('change',function(){document.getElementById('prf-notify-lbl').textContent=this.checked?'פעיל':'כבוי';});
   document.getElementById('prf-rem-on').addEventListener('change',function(){document.getElementById('prf-rem-lbl').textContent=this.checked?'פעיל':'כבוי';});
   document.getElementById('prf-smart').addEventListener('change',function(){document.getElementById('prf-smart-lbl').textContent=this.checked?'פעיל':'כבוי';});
+  buildSubscriptionCard(container);
+}
+
+// Clients billed through SUMIT (online signup, or an admin-entered customer number) see their
+// subscription and can cancel it. Clients the admin manages by hand see nothing new here.
+function buildSubscriptionCard(container){
+  const p=gP();
+  if(p.signupSource!=='self'&&!p.sumitCustomerId)return;
+  const endFmt=p.subscriptionEnd?new Date(p.subscriptionEnd).toLocaleDateString('he-IL'):'';
+  const card=document.createElement('div');
+  card.className='card';
+  card.innerHTML='<div class="lbl">מנוי</div>'
+    +(p.cancelledAt
+      ?'<div style="font-size:13px;color:#555;line-height:1.7;">המנוי בוטל'+(endFmt?'. הגישה לכלי תימשך עד <strong>'+endFmt+'</strong>.':'.')+'</div>'
+      :'<div style="font-size:13px;color:#555;line-height:1.7;margin-bottom:12px;">מנוי חודשי: 25 ₪ + מע״מ. מתחדש אוטומטית.</div>'
+        +'<div id="sub-err" class="err" style="display:none;"></div>'
+        +'<button class="btn-red" id="sub-cancel">ביטול מנוי</button>');
+  container.appendChild(card);
+  const btn=document.getElementById('sub-cancel');
+  if(!btn)return;
+  btn.addEventListener('click',async function(){
+    if(!confirm('לבטל את המנוי? לא יבוצעו חיובים נוספים, והגישה לכלי תימשך עד סוף התקופה ששולמה.'))return;
+    btn.disabled=true;btn.textContent='מבטל...';
+    const err=document.getElementById('sub-err');
+    try{
+      const res=await billing('cancel');
+      if(!res.ok)throw new Error(res.error);
+      p.cancelledAt=new Date().toISOString();
+      if(res.endDate)p.subscriptionEnd=res.endDate+'T23:59:59';
+      renderTab();
+    }catch(e){
+      console.warn('cancel:',e);
+      err.style.display='block';
+      err.textContent=String(e.message)==='already_cancelled'?'המנוי כבר בוטל.':'הביטול נכשל. נסה שוב, או כתוב לנו: aviv@bottomline.finance';
+      btn.disabled=false;btn.textContent='ביטול מנוי';
+    }
+  });
 }
 
 function buildReminderUI(container){
