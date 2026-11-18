@@ -91,5 +91,5 @@ end $$;
 revoke execute on function public.pf_claim_client() from anon, public;
 grant execute on function public.pf_claim_client(), public.pf_is_admin() to authenticated;
 
--- Put your own Google email(s) here before running:
--- insert into public.pf_admins (email) values ('you@gmail.com') on conflict do nothing;
+-- Admin (same as MoneySystem's PLATFORM_ADMIN_EMAILS). Add more lines for more admins.
+insert into public.pf_admins (email) values ('aviv.shai08@gmail.com') on conflict do nothing;

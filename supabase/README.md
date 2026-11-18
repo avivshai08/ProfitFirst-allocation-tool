@@ -12,7 +12,7 @@ row (`clients.user_id`). From then on the link is by account, not by email.
 
 | # | Step | Who | Affects the live site? | Undo |
 |---|------|-----|------------------------|------|
-| 1 | Run `00_inspect.sql` (read-only) in Supabase → SQL Editor; send the results | You | No | — |
+| 1 | Run `00_inspect.sql` (read-only, one result table) in Supabase → SQL Editor; send the results | You | No | — |
 | 2 | Run `01_backup.sql`; also export `clients`, `allocations`, `settings` as CSV and keep them | You | No | — |
 | 3 | Google Cloud: OAuth client (Web). Authorized redirect URI `https://wmqgzcxwukyiahsxtupf.supabase.co/auth/v1/callback`. Supabase → Authentication → Providers → Google: paste client ID/secret, enable. Turn **off** the Email provider. Authentication → URL Configuration: Site URL = the tool's address; add `http://localhost:8080` to Redirect URLs for step 5 | You | No | Disable the provider |
 | 4 | Put your Google email in the last line of `02_prepare.sql`, uncomment it, run the file | You | No (adds empty columns and functions only) | — |
