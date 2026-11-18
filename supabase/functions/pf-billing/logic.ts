@@ -41,6 +41,8 @@ export type ClientRow = {
   id: string;
   name: string;
   email: string;
+  /** The verified Google email the client signed up with (also prefilled on the payment page). */
+  login_email: string | null;
   signup_source: string | null;
   sumit_customer_id: string | null;
   awaiting_payment: boolean;
@@ -53,6 +55,8 @@ export type ClientRow = {
 export interface Sumit {
   list(customer: SumitCustomer, includeInactive: boolean): Promise<RecurringItem[]>;
   cancel(customer: SumitCustomer, recurringItemId: number): Promise<void>;
+  /** SUMIT customer numbers whose email is exactly this address. */
+  customerIdsByEmail(email: string): Promise<string[]>;
 }
 export interface Clients {
   byUserId(userId: string): Promise<ClientRow | null>;
@@ -160,15 +164,34 @@ function asColumns(next: EndDates) {
   };
 }
 
-/** Opens access for a signup awaiting payment once SUMIT shows a paying order for it. */
+/**
+ * Opens access for a signup awaiting payment once SUMIT shows a paying order for this
+ * tool's item. The customer is found by our client id (the payment page's
+ * customerexternalidentifier), or by the customer number the admin entered. SUMIT may
+ * instead file the payment under an existing customer card (seen in the first real test,
+ * 2026-11-18), so as a fallback the customers with the client's verified Google email are
+ * checked; the customer number found there is saved, so later checks and cancelling use it.
+ */
 export async function confirmSignup(row: ClientRow, deps: { clients: Clients; sumit: Sumit; productItemId: number }) {
   if (!row.awaiting_payment) return true;
-  // By our client id, unless the admin entered the customer number (SUMIT filed the
-  // payment under an existing customer card).
   const customer = sumitCustomerOf(row) ?? { externalId: externalIdOf(row.id) };
-  const items = ofThisProduct(await deps.sumit.list(customer, false), deps.productItemId);
-  if (billingState(items) !== 'paying') return false;
-  await deps.clients.update(row.id, { awaiting_payment: false, active: true, subscription_end: null, sumit_end_date: null });
+  let paying = billingState(ofThisProduct(await deps.sumit.list(customer, false), deps.productItemId)) === 'paying';
+  let foundCustomerId: string | null = null;
+  if (!paying && !row.sumit_customer_id && row.login_email) {
+    for (const customerId of await deps.sumit.customerIdsByEmail(row.login_email)) {
+      const items = ofThisProduct(await deps.sumit.list({ customerId }, false), deps.productItemId);
+      if (billingState(items) === 'paying') {
+        paying = true;
+        foundCustomerId = customerId;
+        break;
+      }
+    }
+  }
+  if (!paying) return false;
+  await deps.clients.update(row.id, {
+    awaiting_payment: false, active: true, subscription_end: null, sumit_end_date: null,
+    ...(foundCustomerId ? { sumit_customer_id: foundCustomerId } : {}),
+  });
   return true;
 }
 

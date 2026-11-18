@@ -60,13 +60,25 @@ const sumit: Sumit = {
       '/billing/recurring/listforcustomer/',
       { Customer: customerRef(customer), IncludeInactive: includeInactive },
     );
-    return (data?.RecurringItems ?? []).map((item): RecurringItem => ({
+    const items = (data?.RecurringItems ?? []).map((item): RecurringItem => ({
       id: Number(item.ID),
       itemId: item.Item?.ID != null ? Number(item.Item.ID) : null,
       status: enumNumber(item.Status, STATUS) ?? -1,
       firstBilling: isoDate(item.Date_Start),
       previousBilling: isoDate(item.Date_PreviousBilling),
     }));
+    // Item numbers and statuses only (no personal details), to diagnose from the Logs tab.
+    console.log(`sumit list ${JSON.stringify(customer)}: ${items.map((i) => `item ${i.itemId} status ${i.status}`).join(', ') || 'none'}`);
+    return items;
+  },
+  async customerIdsByEmail(email) {
+    const data = await sumitCall<{ Customers?: Array<Record<string, any>> | null }>(
+      '/accounting/customers/list/',
+      { EmailAddress: email, Paging: { StartIndex: 0, PageSize: 20 } },
+    );
+    const ids = (data?.Customers ?? []).map((c) => String(c.ID)).filter((id) => /^\d+$/.test(id));
+    console.log(`sumit customers by email: ${ids.join(', ') || 'none'}`);
+    return ids;
   },
   async cancel(customer, recurringItemId) {
     await sumitCall('/billing/recurring/cancel/', { Customer: customerRef(customer), RecurringCustomerItemID: recurringItemId });
@@ -74,7 +86,7 @@ const sumit: Sumit = {
 };
 
 const db = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { auth: { persistSession: false } });
-const COLUMNS = 'id,name,email,signup_source,sumit_customer_id,awaiting_payment,subscription_end,sumit_end_date,subscription_cancelled_at,created_at';
+const COLUMNS = 'id,name,email,login_email,signup_source,sumit_customer_id,awaiting_payment,subscription_end,sumit_end_date,subscription_cancelled_at,created_at';
 async function rows(query: PromiseLike<{ data: unknown; error: unknown }>): Promise<ClientRow[]> {
   const { data, error } = await query;
   if (error) throw new Error(JSON.stringify(error));
