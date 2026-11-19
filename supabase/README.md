@@ -19,7 +19,8 @@ that matches no client gets the signup screen instead.
 | `01_backup.sql` | Copies the three tables into a private `pf_backup` schema | No |
 | `02_prepare.sql` | Adds empty `user_id`, `login_email`; admin list (aviv.shai08@gmail.com); sign-in functions | No |
 | `04_billing.sql` | Adds empty billing columns; signup function | No |
-| `functions/pf-billing/` | Edge Function: confirms payments, cancels, daily SUMIT check, signup/cancel emails | No |
+| `functions/pf-billing/` | Edge Function: confirms payments, cancels, daily SUMIT check, signup/cancel emails, admin's invite and "סיים מנוי" | No |
+| `tools/build-pf-billing-single.cjs` | Builds `pf-billing-single.ts`, the one file pasted into the dashboard editor (`node supabase/tools/build-pf-billing-single.cjs`) | No |
 | `03a_signed_in_rules.sql` | Adds the rules for Google-signed-in users (admin sees all, client only own) next to the open ones, so the new site can be tried before the switch | No |
 | `03_cutover.sql` | Switches access rules to per-user (the moment of the switch) | **Yes** |
 | `03_rollback.sql` | Puts the access rules back exactly as before 03 | Yes (back to old) |
@@ -39,7 +40,7 @@ that matches no client gets the signup screen instead.
    - Supabase → Authentication → Providers → Google: paste client ID and secret, enable. Turn **off** the Email provider.
    - Supabase → Authentication → URL Configuration: Site URL `https://app.profitfirst.finance`; Redirect URLs: `https://app.profitfirst.finance/**` and `http://localhost:8080/**`.
 4. **Database additions** — run `02_prepare.sql`, then `04_billing.sql`. The live site keeps working.
-5. **Billing function** — done 2026-11-18: deployed from the dashboard as `pf-billing` (one file: `emails.ts` + `logic.ts` + `index.ts` combined); Supabase gave it the address `/functions/v1/quick-task`, which the page and `05_billing_schedule.sql` use. Secrets (Edge Functions → Secrets):
+5. **Billing function** — done 2026-11-18: deployed from the dashboard as `pf-billing` (one file: `emails.ts` + `logic.ts` + `index.ts` combined; to update it, run `node supabase/tools/build-pf-billing-single.cjs` and paste `supabase/pf-billing-single.ts` over the function's code, then Deploy); Supabase gave it the address `/functions/v1/quick-task`, which the page and `05_billing_schedule.sql` use. Secrets (Edge Functions → Secrets):
    - `SUMIT_COMPANY_ID`, `SUMIT_API_KEY` — the same SUMIT account as MoneySystem (SUMIT → Developers → API keys);
    - `PF_SUMIT_ITEM_ID` — `2003256952` (found 2026-11-18): the ID of the tool's catalog item in SUMIT (only that item's standing orders count, so a MoneySystem subscription never opens the tool and is never cancelled by it). To find it, run in PowerShell with your company ID and API key: `$b=@{Credentials=@{CompanyID=<מספר חברה>;APIKey='<API key>'};Paging=@{StartIndex=0;PageSize=100}}|ConvertTo-Json -Depth 3; (Invoke-RestMethod -Method Post -Uri https://api.sumit.co.il/accounting/incomeitems/list/ -ContentType 'application/json' -Body $b).Data.IncomeItems | Format-Table ID,Name,Price`;
    - `PF_CRON_SECRET` — any long random text (also goes into `05_billing_schedule.sql` and `06_reminders_schedule.sql`);
@@ -70,6 +71,7 @@ that matches no client gets the signup screen instead.
 - Cancel (client's ביטול מנוי, or in SUMIT): access to a month after the last payment, or to the end of the free month.
 - Emails (Resend, from and to aviv@bottomline.finance for the admin): when a signup is confirmed, the client gets a welcome (with the first charge date during the free month) and the admin a new-client notice; when a subscription is cancelled (the client in the tool, or found cancelled in SUMIT by the daily check) both get one, once. A failed email is logged in pf-billing → Logs and never blocks billing.
 - Clients the admin adds get no automatic email; the admin sends **שלח מייל הצטרפות** from the client card when ready (pf-billing `invite`, admin only, read from the saved details; not sent to a client without access).
+- Admin's **סיים מנוי** (list ⏸ or client card) on a client with a SUMIT customer number goes through pf-billing `admin_end` (admin only): it cancels the tool's standing order in SUMIT first, then ends access now; if SUMIT fails nothing changes. No email is sent. A client without a SUMIT number only gets today's end date. **מחק לקוח** is refused while a SUMIT-billed client has not been cancelled, so no standing order is left running without a profile.
 - An end date the admin set is never changed by the billing check. Clients the admin manages by hand (no online signup, no SUMIT customer number) are never sent to SUMIT.
 
 ## Tests

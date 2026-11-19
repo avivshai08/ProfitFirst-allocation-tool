@@ -3,6 +3,7 @@
 //   {action:"cancel"}  — signed-in client: cancel their standing order (ביטול מנוי)
 //   {action:"daily"}   — scheduled job (header x-cron-secret): see logic.ts runDaily
 //   {action:"invite", clientId} — admin only: "שלח מייל הצטרפות" to a client (how to sign in)
+//   {action:"admin_end", clientId} — admin only: "סיים מנוי": cancel the SUMIT order, end access now
 // Secrets (Supabase → Edge Functions → Secrets): SUMIT_COMPANY_ID, SUMIT_API_KEY,
 // PF_SUMIT_ITEM_ID (this tool's catalog item in SUMIT), PF_CRON_SECRET, RESEND_API_KEY (the
 // signup and cancellation emails, see emails.ts; without it billing still works, unannounced).
@@ -13,6 +14,7 @@ import {
   type ClientRow,
   type Clients,
   confirmSignup,
+  endNow,
   type Notify,
   type RecurringItem,
   runDaily,
@@ -131,6 +133,9 @@ const clients: Clients = {
   async byUserId(userId) {
     return (await rows(db.from('clients').select(COLUMNS).eq('user_id', userId).limit(1)))[0] ?? null;
   },
+  async byId(id) {
+    return (await rows(db.from('clients').select(COLUMNS).eq('id', id).limit(1)))[0] ?? null;
+  },
   pendingSince(isoDate) {
     return rows(db.from('clients').select(COLUMNS).eq('awaiting_payment', true).gte('created_at', isoDate));
   },
@@ -196,6 +201,12 @@ Deno.serve(async (req) => {
     if (action === 'invite') {
       if (!(await isAdmin(auth.user))) return reply({ error: 'forbidden' }, 403);
       return reply(await invite(String(body.clientId ?? '')));
+    }
+    if (action === 'admin_end') {
+      if (!(await isAdmin(auth.user))) return reply({ error: 'forbidden' }, 403);
+      const target = await clients.byId(String(body.clientId ?? ''));
+      if (!target) return reply({ error: 'no_client' }, 404);
+      return reply(await endNow(target, new Date().toISOString(), deps));
     }
     const row = await clients.byUserId(auth.user.id);
     if (!row) return reply({ error: 'no_client' }, 404);

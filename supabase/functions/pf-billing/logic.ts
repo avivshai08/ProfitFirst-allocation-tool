@@ -66,6 +66,7 @@ export interface Sumit {
 }
 export interface Clients {
   byUserId(userId: string): Promise<ClientRow | null>;
+  byId(id: string): Promise<ClientRow | null>;
   pendingSince(isoDate: string): Promise<ClientRow[]>;
   billed(): Promise<ClientRow[]>;
   update(id: string, values: Partial<ClientRow> & { active?: boolean }): Promise<void>;
@@ -245,6 +246,31 @@ export async function cancelSubscription(row: ClientRow, today: string, deps: De
   const endDate = next ? next.endDate : dateOf(row.subscription_end);
   await quietly(deps, `cancel ${row.id}`, () => deps.notify?.cancelled(row, endDate, 'client'));
   return { ok: true, endDate };
+}
+
+export type EndResult = { ok: true; endedAt: string; cancelledInSumit: number; cancelledAt: string | null };
+
+/**
+ * The admin's "סיים מנוי": cancels this tool's live standing orders in SUMIT (for a client with
+ * a SUMIT customer number), then ends access now. The end date is the admin's (sumit_end_date
+ * cleared), so the daily check never changes it; recording the cancellation keeps the daily
+ * check from reporting it again. No email: the admin tells the client. SUMIT is cancelled
+ * first, so if SUMIT fails nothing in the tool changes and the admin can try again (orders
+ * already cancelled are skipped).
+ */
+export async function endNow(row: ClientRow, now: string, deps: Deps): Promise<EndResult> {
+  const customer = sumitCustomerOf(row);
+  let cancelledInSumit = 0;
+  if (customer) {
+    const live = ofThisProduct(await deps.sumit.list(customer, false), deps.productItemId).filter((item) => !ENDED.includes(item.status));
+    for (const item of live) {
+      await deps.sumit.cancel(customer, item.id);
+      cancelledInSumit += 1;
+    }
+  }
+  const cancelledAt = customer ? (row.subscription_cancelled_at ?? now) : row.subscription_cancelled_at;
+  await deps.clients.update(row.id, { active: false, subscription_end: now, sumit_end_date: null, subscription_cancelled_at: cancelledAt });
+  return { ok: true, endedAt: now, cancelledInSumit, cancelledAt };
 }
 
 export type DailyResult = { opened: number; changed: number; failed: number };

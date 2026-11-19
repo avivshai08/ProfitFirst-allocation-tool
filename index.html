@@ -123,7 +123,29 @@ async function sbHeaders(){const{data}=await sb.auth.getSession();return{'apikey
 async function sbGet(t,p=''){const r=await fetch(SB_URL+'/rest/v1/'+t+p,{headers:await sbHeaders()});if(!r.ok)throw new Error(await r.text());return r.json();}
 async function sbPost(t,b){const r=await fetch(SB_URL+'/rest/v1/'+t,{method:'POST',headers:{...await sbHeaders(),'Content-Type':'application/json','Prefer':'return=representation'},body:JSON.stringify(b)});if(!r.ok)throw new Error(await r.text());return r.json();}
 async function sbPatch(t,p,b){const r=await fetch(SB_URL+'/rest/v1/'+t+p,{method:'PATCH',headers:{...await sbHeaders(),'Content-Type':'application/json','Prefer':'return=representation'},body:JSON.stringify(b)});if(!r.ok)throw new Error(await r.text());return r.json();}
-async function sbDelete(t,p){const r=await fetch(SB_URL+'/rest/v1/'+t+p,{method:'DELETE',headers:await sbHeaders()});if(!r.ok)throw new Error(await r.text());return true;}
+async function sbDelete(t,p){const r=await fetch(SB_URL+'/rest/v1/'+t+p,{method:'DELETE',headers:{...await sbHeaders(),'Prefer':'return=representation'}});if(!r.ok)throw new Error(await r.text());return r.json();}
+// The access rules turn a write the user may not make into "0 rows" rather than an error,
+// so a write that should change one row and changed none is a failure too.
+function oneRow(rows){if(!Array.isArray(rows)||!rows.length)throw new Error('no row changed');return rows;}
+
+// Text from the database (names typed by clients, signups, the admin) goes into the page
+// as HTML: always through esc(), so it shows as text and can never run as code.
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+// Colours stored with past allocations come from the client's browser: only a plain #hex is used.
+function safeColor(c){return /^#[0-9A-Fa-f]{3,8}$/.test(String(c||''))?c:'#888780';}
+
+// A save that did not reach the database: say so instead of looking saved.
+function saveFailed(e){
+  console.warn('save failed:',e);
+  let el=document.getElementById('save-fail');
+  if(!el){
+    el=document.createElement('div');el.id='save-fail';el.setAttribute('role','alert');
+    el.style.cssText='position:fixed;bottom:16px;left:50%;transform:translateX(-50%);width:max-content;max-width:90%;background:var(--danger-bg);color:var(--danger);border:1px solid var(--danger);border-radius:8px;padding:10px 14px;font-size:13px;font-weight:500;z-index:10000;box-shadow:0 2px 8px rgba(0,0,0,.15);direction:rtl;';
+    document.body.appendChild(el);
+  }
+  el.textContent='⚠ השינויים לא נשמרו. בדוק את החיבור לאינטרנט ונסה שוב.';
+  el.style.display='block';clearTimeout(el._t);el._t=setTimeout(()=>{el.style.display='none';},6000);
+}
 async function sbRpc(fn,args){const r=await fetch(SB_URL+'/rest/v1/rpc/'+fn,{method:'POST',headers:{...await sbHeaders(),'Content-Type':'application/json'},body:JSON.stringify(args||{})});if(!r.ok)throw new Error(await r.text());return r.json();}
 
 // Online signup: SUMIT payment page (monthly standing order, first 30 days free) and the
@@ -159,7 +181,6 @@ async function sendConfirmation(clientId,entry){
 }
 
 async function dbLoadSettings(){try{const rows=await sbGet('settings','?id=eq.1&select=brand');if(rows&&rows[0]){state.brand=rows[0].brand||state.brand;}}catch(e){console.warn('settings:',e);}}
-async function dbSaveSettings(){try{await sbPatch('settings','?id=eq.1',{brand:state.brand});}catch(e){console.warn(e);}}
 function rowToProfile(r){
   return{name:r.name,accounts:r.accounts||[],lastIncome:r.last_income||'',
     email:r.email||'',businessName:r.business_name||'',reminderEnabled:r.reminder_enabled||false,reminderFrequency:r.reminder_frequency||'biweekly',
@@ -169,12 +190,11 @@ function rowToProfile(r){
     awaitingPayment:r.awaiting_payment===true,signupSource:r.signup_source||'',phone:r.phone||'',
     sumitCustomerId:r.sumit_customer_id||'',cancelledAt:r.subscription_cancelled_at||null};
 }
+// Loading errors are thrown, so an empty list or log is never shown in place of one that failed to load.
 async function dbLoadClients(){
-  try{
-    const rows=await sbGet('clients','?select=*');
-    state.profiles={};
-    (rows||[]).forEach(r=>{state.profiles[r.id]=rowToProfile(r);});
-  }catch(e){console.warn('loadClients:',e);}
+  const rows=await sbGet('clients','?select=*');
+  state.profiles={};
+  (rows||[]).forEach(r=>{state.profiles[r.id]=rowToProfile(r);});
 }
 async function dbLoadClient(id){
   const rows=await sbGet('clients','?id=eq.'+id+'&select=*');
@@ -183,23 +203,21 @@ async function dbLoadClient(id){
   return state.profiles[id];
 }
 async function dbLoadLog(clientId){
-  try{
-    const rows=await sbGet('allocations','?client_id=eq.'+clientId+'&order=created_at.desc');
-    if(state.profiles[clientId])state.profiles[clientId].log=(rows||[]).map(r=>{return{date:r.date,dateNum:r.date_num,time:r.time,income:r.income,results:r.results};}); 
-  }catch(e){console.warn('loadLog:',e);}
+  const rows=await sbGet('allocations','?client_id=eq.'+clientId+'&order=created_at.desc');
+  if(state.profiles[clientId])state.profiles[clientId].log=(rows||[]).map(r=>{return{date:r.date,dateNum:r.date_num,time:r.time,income:r.income,results:r.results||[]};});
 }
 async function dbSaveClient(id){
   const p=state.profiles[id];if(!p)return;
-  try{await sbPatch('clients','?id=eq.'+id,{accounts:p.accounts,last_income:p.lastIncome||'',
+  oneRow(await sbPatch('clients','?id=eq.'+id,{accounts:p.accounts,last_income:p.lastIncome||'',
     email:p.email||'',business_name:p.businessName||'',notify_alloc:p.notifyAlloc!==false,smart_alloc:p.smartAlloc!==false,
     reminder_enabled:p.reminderEnabled||false,reminder_frequency:p.reminderFrequency||'biweekly',
     reminder_day:p.reminderDay||'sunday',reminder_dates:p.reminderDates||'1,15',
-    subscription_end:p.subscriptionEnd||null,active:p.active!==false,login_email:p.loginEmail||null,sumit_customer_id:p.sumitCustomerId||null});}catch(e){console.warn('saveClient:',e);}
+    subscription_end:p.subscriptionEnd||null,active:p.active!==false,login_email:p.loginEmail||null,sumit_customer_id:p.sumitCustomerId||null}));
 }
-async function dbCreateClient(name,loginEmail,subEnd){try{const rows=await sbPost('clients',{name,login_email:loginEmail,accounts:DEFA(),last_income:'',email:'',reminder_enabled:false,active:true,subscription_end:subEnd||null,smart_alloc:true});return rows&&rows[0]?rows[0].id:null;}catch(e){console.warn(e);return null;}}
-async function dbUnlinkClient(id){await sbPatch('clients','?id=eq.'+id,{user_id:null});}
-async function dbDeleteClient(id){try{await sbDelete('clients','?id=eq.'+id);}catch(e){console.warn(e);}}
-async function dbSaveAllocation(clientId,entry){try{await sbPost('allocations',{client_id:clientId,date:entry.date,date_num:entry.dateNum,time:entry.time,income:entry.income,results:entry.results});}catch(e){console.warn(e);}}
+async function dbCreateClient(name,loginEmail,subEnd){const rows=oneRow(await sbPost('clients',{name,login_email:loginEmail,accounts:DEFA(),last_income:'',email:'',reminder_enabled:false,active:true,subscription_end:subEnd||null,smart_alloc:true}));return rows[0].id;}
+async function dbUnlinkClient(id){oneRow(await sbPatch('clients','?id=eq.'+id,{user_id:null}));}
+async function dbDeleteClient(id){oneRow(await sbDelete('clients','?id=eq.'+id));}
+async function dbSaveAllocation(clientId,entry){oneRow(await sbPost('allocations',{client_id:clientId,date:entry.date,date_num:entry.dateNum,time:entry.time,income:entry.income,results:entry.results}));}
 const COLORS=['#1D9E75','#378ADD','#D85A30','#D4537E','#7F77DD','#BA7517','#639922','#E24B4A','#888780'];
 let custN=0,curId=null,curAdminClientId=null,activeTab='alloc';
 
@@ -293,16 +311,16 @@ function renderLand(msg){
   const gIcon='<svg width="18" height="18" viewBox="0 0 48 48" style="vertical-align:middle;margin-left:8px;"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.6l6.7-6.7C35.6 2.5 30.2 0 24 0 14.6 0 6.6 5.4 2.7 13.2l7.8 6.1C12.4 13.5 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.5 5.8c4.4-4.1 7.1-10.1 7.1-17.5z"/><path fill="#FBBC05" d="M10.5 28.7c-.5-1.4-.8-3-.8-4.7s.3-3.2.8-4.7l-7.8-6.1C1 16.6 0 20.2 0 24s1 7.4 2.7 10.8l7.8-6.1z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.5-5.8c-2.1 1.4-4.9 2.3-8.4 2.3-6.3 0-11.6-4-13.5-9.6l-7.8 6.1C6.6 42.6 14.6 48 24 48z"/></svg>';
   let html=
     '<div style="text-align:center;padding:8px 0 20px;">'
-    +'<p style="font-size:14px;color:#555;line-height:1.6;">כלי לחלוקת הכנסות מבית '+(b.name||'Bottom Line')+'</p>'
+    +'<p style="font-size:14px;color:#555;line-height:1.6;">כלי לחלוקת הכנסות מבית '+esc(b.name||'Bottom Line')+'</p>'
     +'</div>'
     +'<div class="card">'
     +'<div class="lbl">כניסה לאזור האישי</div>'
     +(signedIn
-      ?'<div style="font-size:13px;color:#555;margin-bottom:10px;">מחובר כ־<strong dir="ltr">'+state.authEmail+'</strong></div>'
-        +(msg?'<div class="err" style="display:block;margin-bottom:12px;">'+msg+'</div>':'')
+      ?'<div style="font-size:13px;color:#555;margin-bottom:10px;">מחובר כ־<strong dir="ltr">'+esc(state.authEmail)+'</strong></div>'
+        +(msg?'<div class="err" style="display:block;margin-bottom:12px;">'+esc(msg)+'</div>':'')
         +'<button class="action-btn" onclick="signInGoogle()">'+gIcon+'כניסה עם חשבון Google אחר</button>'
         +'<div style="text-align:center;margin-top:8px;"><button style="font-size:12px;color:#888;background:none;border:none;cursor:pointer;" onclick="signOut()">התנתק</button></div>'
-      :(msg?'<div class="err" style="display:block;margin-bottom:12px;">'+msg+'</div>':'')
+      :(msg?'<div class="err" style="display:block;margin-bottom:12px;">'+esc(msg)+'</div>':'')
         +'<button class="action-btn" onclick="signInGoogle()">'+gIcon+'כניסה עם Google</button>'
         +'<div style="font-size:11px;color:#999;margin-top:8px;text-align:center;line-height:1.6;">היכנס עם חשבון ה־Google של כתובת האימייל הרשומה אצלנו</div>')
     +'</div>'
@@ -327,13 +345,13 @@ function renderSupport(){
   const el=document.getElementById('supp');if(!el)return;
   const s=state.brand||{};
   let lines=[];
-  if(s.supportName)lines.push('<span style="font-weight:500;color:#333;">'+s.supportName+'</span>');
-  if(s.supportEmail)lines.push('<a href="mailto:'+s.supportEmail+'" style="color:var(--td);">'+s.supportEmail+'</a>');
-  if(s.supportPhone)lines.push('<a href="tel:'+s.supportPhone+'" style="color:var(--td);">'+s.supportPhone+'</a>');
-  if(s.supportNote)lines.push('<span style="color:#888;font-style:italic;">'+s.supportNote+'</span>');
+  if(s.supportName)lines.push('<span style="font-weight:500;color:#333;">'+esc(s.supportName)+'</span>');
+  if(s.supportEmail)lines.push('<a href="mailto:'+esc(s.supportEmail)+'" style="color:var(--td);">'+esc(s.supportEmail)+'</a>');
+  if(s.supportPhone)lines.push('<a href="tel:'+esc(s.supportPhone)+'" style="color:var(--td);">'+esc(s.supportPhone)+'</a>');
+  if(s.supportNote)lines.push('<span style="color:#888;font-style:italic;">'+esc(s.supportNote)+'</span>');
   const email=s.supportEmail||'aviv@bottomline.finance';
   const name=s.supportName||(s.name||'Bottom Line');
-  el.innerHTML=lines.length>0?lines.join('<br>'):'<a href="mailto:'+email+'" style="color:var(--td);font-weight:500;">'+name+'</a>';
+  el.innerHTML=lines.length>0?lines.join('<br>'):'<a href="mailto:'+esc(email)+'" style="color:var(--td);font-weight:500;">'+esc(name)+'</a>';
 }
 
 function showLoading(){
@@ -346,7 +364,8 @@ function signInGoogle(){
     .then(function(res){if(res.error){console.warn(res.error);renderLand('הכניסה עם Google נכשלה. נסה שוב.');}});
 }
 
-function signOut(){
+async function signOut(){
+  if(curId&&state.profiles[curId])await flushAccounts();
   sb.auth.signOut().catch(function(e){console.warn(e);}).then(function(){
     state.authEmail=null;state.profiles={};curId=null;curAdminClientId=null;renderLand();
   });
@@ -379,8 +398,6 @@ async function enterSignedIn(session){
   }
 }
 
-function escAttr(s){return String(s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');}
-
 // A Google account with no client profile: sign up and continue to the SUMIT payment page.
 function renderSignup(session){
   const meta=(session&&session.user&&session.user.user_metadata)||{};
@@ -388,8 +405,8 @@ function renderSignup(session){
     '<div class="card">'
     +'<div class="lbl">הרשמה לכלי לחלוקת הכנסות</div>'
     +'<div style="font-size:13px;color:#555;margin-bottom:12px;line-height:1.7;">'+PRICE_TEXT+'<br>ביטול בכל עת מתוך הגדרות הפרופיל.</div>'
-    +'<div style="font-size:12px;color:#888;margin-bottom:12px;">מחובר כ־<strong dir="ltr">'+state.authEmail+'</strong></div>'
-    +'<div class="ig"><label>שם מלא</label><input type="text" id="su-name" value="'+escAttr(meta.full_name||meta.name||'')+'" autocomplete="name"></div>'
+    +'<div style="font-size:12px;color:#888;margin-bottom:12px;">מחובר כ־<strong dir="ltr">'+esc(state.authEmail)+'</strong></div>'
+    +'<div class="ig"><label>שם מלא</label><input type="text" id="su-name" value="'+esc(meta.full_name||meta.name||'')+'" autocomplete="name"></div>'
     +'<div class="ig"><label>טלפון נייד</label><input type="tel" id="su-phone" dir="ltr" placeholder="05X-XXXXXXX" autocomplete="tel"></div>'
     +'<label style="display:flex;gap:8px;align-items:flex-start;font-size:12px;color:#555;margin:6px 0 12px;line-height:1.6;cursor:pointer;">'
     +'<input type="checkbox" id="su-terms" style="width:16px;height:16px;margin-top:2px;flex-shrink:0;">'
@@ -443,36 +460,13 @@ function renderAdmin(){
   renderAdminTab('clients');
 }
 
+// The admin screen: the client list (the tab argument is kept for the existing callers).
 function renderAdminTab(tab){
-  const b=state.brand||{};
   const ids=Object.keys(state.profiles);
   const now=new Date();
 
-  const tabs=
-    '<div class="tab-bar" style="margin-bottom:16px;">'
-    +'<button class="tab '+(tab==='settings'?'on':'')+'" onclick="renderAdminTab(&apos;settings&apos;)">הגדרות</button>'
-    +'<button class="tab '+(tab==='clients'?'on':'')+'" onclick="renderAdminTab(&apos;clients&apos;)">ניהול לקוחות</button>'
-    +'</div>';
-
   let body='';
-
-  if(tab==='settings'){
-    body=
-      '<div class="card card-teal" style="margin-bottom:14px;"><div class="lbl">עיצוב ומיתוג</div>'
-      +'<div class="ig"><label>שם העסק</label><input type="text" id="b-name" value="'+(b.name||'')+'"></div>'
-      +'<div class="ig"><label>תגית</label><input type="text" id="b-tag" value="'+(b.tag||'')+'"></div>'
-      +'<div class="ig"><label>קישור לוגו (URL)</label><input type="text" id="b-logo" value="'+(b.logoUrl||'')+'" placeholder="https://..."></div>'
-      +'<div class="ig"><label>צבע מותג</label>'
-      +'<div style="display:flex;gap:8px;align-items:center;">'
-      +'<input type="color" id="b-col" value="'+(b.color||'#80CECE')+'" style="width:44px;height:34px;padding:2px;cursor:pointer;border-radius:6px;" oninput="document.getElementById(&quot;b-hex&quot;).value=this.value">'
-      +'<input type="text" id="b-hex" value="'+(b.color||'#80CECE')+'" placeholder="#5BC8C0" style="flex:1;" oninput="if(/^#[0-9A-Fa-f]{6}$/.test(this.value))document.getElementById(&quot;b-col&quot;).value=this.value">'
-      +'</div></div>'
-      +'<div class="ig"><label>צבע טקסט</label>'
-      +'<select id="b-tc"><option value="#1A1A1A" '+((b.tc||'#1A1A1A')==='#1A1A1A'?'selected':'')+'>כהה</option><option value="#FFFFFF" '+(b.tc==='#FFFFFF'?'selected':'')+'>לבן</option></select></div>'
-      +'<div id="bmsg" class="suc" style="display:none;"></div>'
-      +'<button class="btn-sm" onclick="saveBrand()">שמור עיצוב</button></div>';
-
-  } else {
+  {
     // Clients tab - clean list with action icons
     let clientRows='';
     ids.forEach((id,i)=>{
@@ -483,9 +477,9 @@ function renderAdminTab(tab){
       const statusLabel=p.awaitingPayment?'ממתין לתשלום':isActive?'פעיל':'לא פעיל';
       clientRows+=
         '<div style="display:flex;align-items:center;gap:10px;padding:12px;background:var(--color-background-primary);border:1px solid var(--color-border-tertiary);border-radius:12px;margin-bottom:8px;cursor:pointer;" class="adm-open-client" data-id="'+id+'">'
-        +'<div class="av" style="background:'+avB[i%6]+';color:'+avF[i%6]+';flex-shrink:0;">'+ini(p.name)+'</div>'
+        +'<div class="av" style="background:'+avB[i%6]+';color:'+avF[i%6]+';flex-shrink:0;">'+esc(ini(p.name))+'</div>'
         +'<div style="flex:1;min-width:0;">'
-        +'<div class="pname">'+p.name+'</div>'
+        +'<div class="pname">'+esc(p.name)+'</div>'
         +'<span style="font-size:11px;font-weight:600;color:'+statusColor+';background:'+statusColor+'22;padding:2px 8px;border-radius:20px;">'+statusLabel+'</span>'
         +'<span style="font-size:11px;color:#999;margin-right:6px;">'+(p.linked?'מחובר ל־Google':'טרם התחבר')+'</span>'
         +'</div>'
@@ -502,44 +496,76 @@ function renderAdminTab(tab){
     '<div class="topbar"><button class="btn-out" onclick="signOut()">← יציאה</button>'
     +'<span class="tbtitle" style="margin-right:8px;">ניהול</span>'
     +'<span class="badge badge-a">מנהל</span></div>'
-    +tabs+body;
+    +body;
   show('admin');
 
-  // Event delegation
+  // Event delegation, wired once: #s-admin stays while its contents are re-rendered, so
+  // adding a listener on every render made one click act once per earlier render.
   const adminEl=document.getElementById('s-admin');
-  if(adminEl){
+  if(adminEl&&!adminEl._wired){
+    adminEl._wired=true;
     adminEl.addEventListener('click',function(e){
-      // Quick expire - check first before card open
+      // Quick actions first, so the click does not also open the client card
       const expBtn=e.target.closest('.adm-expire-quick');
       if(expBtn&&expBtn.dataset.id){
         e.stopPropagation();
         const pid=expBtn.dataset.id;
-        const pn=state.profiles[pid]?state.profiles[pid].name:'';
-        setTimeout(function(){
-          if(!confirm('לסיים את המנוי של '+pn+' עכשיו?'))return;
-          const p=state.profiles[pid];
-          p.subscriptionEnd=new Date().toISOString();p.active=false;
-          sv();dbSaveClient(pid).then(()=>renderAdminTab('clients')).catch(e=>console.warn(e));
-        },0);
+        setTimeout(function(){adminEndSubscription(pid).then(done=>{if(done)renderAdminTab('clients');});},0);
         return;
       }
-      // Quick delete - check before card open
       const delBtn=e.target.closest('.adm-del-quick');
       if(delBtn&&delBtn.dataset.id){
         e.stopPropagation();
         const pid=delBtn.dataset.id;
-        const pn=state.profiles[pid]?state.profiles[pid].name:'';
-        setTimeout(function(){
-          if(!confirm('למחוק את '+pn+' וכל הנתונים?'))return;
-          dbDeleteClient(pid).then(()=>{delete state.profiles[pid];sv();renderAdminTab('clients');}).catch(()=>{delete state.profiles[pid];sv();renderAdminTab('clients');});
-        },0);
+        setTimeout(function(){adminDeleteClient(pid).then(done=>{if(done)renderAdminTab('clients');});},0);
         return;
       }
-      // Open client card
       const card=e.target.closest('.adm-open-client');
       if(card&&card.dataset.id)openClientAdmin(card.dataset.id);
     });
   }
+}
+
+// "סיים מנוי" (list and client card). A client paying by SUMIT standing order is ended by the
+// billing function, which first cancels the order in SUMIT so no further charges are made;
+// a client managed by hand only gets today's end date. Returns true when ended.
+async function adminEndSubscription(id){
+  const p=state.profiles[id];if(!p)return false;
+  const billed=!!p.sumitCustomerId;
+  if(!confirm('לסיים את המנוי של '+p.name+' עכשיו?\n'+(billed?'הוראת הקבע ב־SUMIT תבוטל (לא יבוצעו חיובים נוספים) והגישה לכלי תיחסם מיד.':'הגישה לכלי תיחסם מיד.')))return false;
+  try{
+    if(billed){
+      const res=await billing('admin_end',{clientId:id});
+      if(!res.ok)throw new Error(res.error||'failed');
+      p.subscriptionEnd=res.endedAt;p.active=false;p.cancelledAt=res.cancelledAt||p.cancelledAt;
+    }else{
+      const before={subscriptionEnd:p.subscriptionEnd,active:p.active};
+      p.subscriptionEnd=new Date().toISOString();p.active=false;
+      try{await dbSaveClient(id);}catch(e){Object.assign(p,before);throw e;}
+    }
+    return true;
+  }catch(e){
+    console.warn('end subscription:',e);
+    alert(billed
+      ?'סיום המנוי נכשל, ולא שונה דבר. ייתכן שהוראת הקבע ב־SUMIT עדיין פעילה. נסה שוב, או בטל אותה ישירות ב־SUMIT.'
+      :'סיום המנוי נכשל, ולא שונה דבר. נסה שוב.');
+    return false;
+  }
+}
+
+// "מחק לקוח" (list and client card). Not while SUMIT may still charge the client: deleting
+// the profile would leave the standing order running with nobody to stop it from here.
+async function adminDeleteClient(id){
+  const p=state.profiles[id];if(!p)return false;
+  if(p.sumitCustomerId&&!p.cancelledAt){
+    alert('ל'+p.name+' יש הוראת קבע ב־SUMIT. לחץ קודם "סיים מנוי" (זה מבטל את הוראת הקבע), ורק אז מחק.');
+    return false;
+  }
+  if(!confirm('למחוק את '+p.name+' וכל הנתונים?'+(p.awaitingPayment?'\nשים לב: הלקוח ממתין לאישור תשלום. אם שילם, הוראת הקבע תצטרך ביטול ידני ב־SUMIT.':'')))return false;
+  try{await dbDeleteClient(id);}
+  catch(e){console.warn('delete client:',e);alert('המחיקה נכשלה, והלקוח לא נמחק. נסה שוב.');return false;}
+  delete state.profiles[id];
+  return true;
 }
 
 
@@ -563,7 +589,7 @@ function adminLoadLog(){
   const id=curAdminClientId;
   if(!id)return;
   renderClientAdminTab('log_loading');
-  dbLoadLog(id).then(()=>renderClientAdminTab('log')).catch(()=>renderClientAdminTab('log'));
+  dbLoadLog(id).then(()=>renderClientAdminTab('log')).catch(e=>{console.warn('load log:',e);renderClientAdminTab('log_error');});
 }
 
 function renderClientAdminTab(tab){
@@ -598,21 +624,21 @@ function renderClientAdminTab(tab){
       '<div class="card">'
       // Header with status
       +'<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;">'
-      +'<div class="av" style="width:48px;height:48px;font-size:16px;background:#E8F8F7;color:#3A9E97;">'+ini(p.name)+'</div>'
+      +'<div class="av" style="width:48px;height:48px;font-size:16px;background:#E8F8F7;color:#3A9E97;">'+esc(ini(p.name))+'</div>'
       +'<div style="flex:1;">'
-      +'<div style="font-size:16px;font-weight:600;margin-bottom:4px;">'+p.name+'</div>'
+      +'<div style="font-size:16px;font-weight:600;margin-bottom:4px;">'+esc(p.name)+'</div>'
       +'<span id="ca-status-badge" style="font-size:11px;font-weight:600;color:'+statusColor+';background:'+statusColor+'22;padding:3px 8px;border-radius:20px;">'+statusLabel+'</span>'
       +'</div></div>'
       // Client info fields
-      +'<div class="ig"><label>שם עסק</label><input type="text" id="ca-biz" value="'+(p.businessName||'')+'" placeholder="לא הוגדר"></div>'
-      +'<div class="ig"><label>אימייל</label><input type="text" id="ca-email" value="'+(p.email||'')+'" placeholder="לא הוגדר"></div>'
+      +'<div class="ig"><label>שם עסק</label><input type="text" id="ca-biz" value="'+esc(p.businessName)+'" placeholder="לא הוגדר"></div>'
+      +'<div class="ig"><label>אימייל</label><input type="text" id="ca-email" value="'+esc(p.email)+'" placeholder="לא הוגדר"></div>'
       // Notification settings read-only
       +'<div style="background:#f9f9f9;border-radius:8px;padding:12px;margin-bottom:10px;">'
       +'<div class="lbl" style="margin-bottom:8px;">הגדרות תזכורות</div>'
       +'<div style="font-size:12px;color:#666;line-height:2;">'
       +'אישור אימייל לאחר חלוקה: <strong>'+(p.notifyAlloc!==false?'פעיל':'כבוי')+'</strong><br>'
       +'תזכורות: <strong>'+(p.reminderEnabled?'פעיל':'כבוי')+'</strong>'
-      +(p.reminderEnabled?'<br>תדירות: <strong>'+({weekly:'שבועי',biweekly:'דו-שבועי',monthly:'חודשי',twicemonthly:'פעמיים בחודש'}[p.reminderFrequency]||p.reminderFrequency)+'</strong>':'')
+      +(p.reminderEnabled?'<br>תדירות: <strong>'+({weekly:'שבועי',biweekly:'דו-שבועי',monthly:'חודשי',twicemonthly:'פעמיים בחודש'}[p.reminderFrequency]||esc(p.reminderFrequency))+'</strong>':'')
       +'</div></div>'
       // Subscription
       +'<div class="lbl" style="margin-bottom:8px;">מנוי</div>'
@@ -625,15 +651,15 @@ function renderClientAdminTab(tab){
       // Billing: online signups are billed by SUMIT automatically; an admin-added client is
       // checked daily only once its SUMIT customer number is entered.
       +'<div style="font-size:12px;color:#555;margin-bottom:8px;line-height:1.8;">מקור: <strong>'+(p.signupSource==='self'?'הרשמה עצמית':'נוסף ע״י מנהל')+'</strong>'
-      +(p.phone?' · טלפון: <span dir="ltr">'+p.phone+'</span>':'')
+      +(p.phone?' · טלפון: <span dir="ltr">'+esc(p.phone)+'</span>':'')
       +(p.cancelledAt?'<br>המנוי בוטל ב־'+new Date(p.cancelledAt).toLocaleDateString('he-IL'):'')+'</div>'
       +'<div class="ig"><label>'+(p.signupSource==='self'?'מספר לקוח SUMIT (נשמר אוטומטית כשהתשלום אושר)':'מספר לקוח SUMIT (הוראת קבע; ריק = ניהול ידני)')+'</label>'
-      +'<input type="text" id="ca-sumit" dir="ltr" inputmode="numeric" value="'+(p.sumitCustomerId||'')+'"></div>'
+      +'<input type="text" id="ca-sumit" dir="ltr" inputmode="numeric" value="'+esc(p.sumitCustomerId)+'"></div>'
       // Google sign-in
       +'<div class="lbl" style="margin:14px 0 8px;">כניסה עם Google</div>'
       +'<div style="font-size:12px;color:#555;margin-bottom:8px;">'+(p.linked?'✓ מחובר לחשבון Google':'טרם התחבר עם Google')+'</div>'
       +'<div class="ig"><label>אימייל לכניסה (ריק = האימייל שלמעלה)</label>'
-      +'<input type="email" id="ca-login-email" dir="ltr" value="'+(p.loginEmail||'')+'" placeholder="'+(p.email||'')+'"></div>'
+      +'<input type="email" id="ca-login-email" dir="ltr" value="'+esc(p.loginEmail)+'" placeholder="'+esc(p.email)+'"></div>'
       +'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">'
       +'<button class="btn-sm" id="ca-invite-btn">שלח מייל הצטרפות</button>'
       +(p.linked?'<button class="btn-sm" id="ca-unlink-btn">נתק חשבון Google</button>':'')
@@ -650,6 +676,8 @@ function renderClientAdminTab(tab){
 
   } else if(tab==='log_loading'){
     body='<div style="text-align:center;padding:30px;color:#999;font-size:13px;">טוען...</div>';
+  } else if(tab==='log_error'){
+    body='<div class="err" style="padding:8px 0;">טעינת היומן נכשלה. <button class="ebtn" onclick="adminLoadLog()">נסה שוב</button></div>';
   } else {
     const log=p.log||[];
     if(!log.length){
@@ -661,8 +689,8 @@ function renderClientAdminTab(tab){
         +'</div>';
       log.forEach(e=>{
         let rr='';
-        e.results.forEach(r=>{rr+='<div class="lrow"><span class="lln"><span style="width:6px;height:6px;border-radius:50%;background:'+r.color+';display:inline-block;margin-left:4px;"></span>'+r.name+'</span><span class="lla">'+fIls(r.amount)+' <span class="lsub">('+Number(r.pct).toFixed(1)+'%)</span></span></div>';});
-        logHtml+='<div class="log-entry"><div class="lhdr"><span class="ldate">'+e.date+' · '+e.time+'</span><span class="linc">'+fIls(e.income)+'</span></div>'+rr+'</div>';
+        e.results.forEach(r=>{rr+='<div class="lrow"><span class="lln"><span style="width:6px;height:6px;border-radius:50%;background:'+safeColor(r.color)+';display:inline-block;margin-left:4px;"></span>'+esc(r.name)+'</span><span class="lla">'+fIls(r.amount)+' <span class="lsub">('+Number(r.pct).toFixed(1)+'%)</span></span></div>';});
+        logHtml+='<div class="log-entry"><div class="lhdr"><span class="ldate">'+esc(e.date)+' · '+esc(e.time)+'</span><span class="linc">'+fIls(e.income)+'</span></div>'+rr+'</div>';
       });
       body=logHtml;
     }
@@ -671,7 +699,7 @@ function renderClientAdminTab(tab){
   document.getElementById('s-admin').innerHTML=
     '<div class="topbar">'
     +'<button class="btn-out" onclick="renderAdminTab(&apos;clients&apos;)">← חזרה</button>'
-    +'<span class="tbtitle" style="margin-right:8px;">'+p.name+'</span>'
+    +'<span class="tbtitle" style="margin-right:8px;">'+esc(p.name)+'</span>'
     +'</div>'
     +tabs+body;
   show('admin');
@@ -703,10 +731,15 @@ function renderClientAdminTab(tab){
       const sumitFld=document.getElementById('ca-sumit');
       if(sumitFld)p.sumitCustomerId=sumitFld.value.replace(/[^0-9]/g,'');
       sv();
+      const btn=this;btn.disabled=true;
       dbSaveClient(id).then(()=>{
         const msg=document.getElementById('ca-msg');
-        if(msg){msg.style.display='block';msg.textContent='✓ השינויים נשמרו';setTimeout(()=>{msg.style.display='none';renderClientAdminTab('info');},2000);}
-      }).catch(e=>console.warn(e));
+        if(msg){msg.className='suc';msg.style.display='block';msg.textContent='✓ השינויים נשמרו';setTimeout(()=>{msg.style.display='none';renderClientAdminTab('info');},2000);}
+      }).catch(e=>{
+        console.warn('save client:',e);btn.disabled=false;
+        const msg=document.getElementById('ca-msg');
+        if(msg){msg.className='err';msg.style.display='block';msg.textContent='⚠ השינויים לא נשמרו. נסה שוב.';}
+      });
     });
 
     // "שלח מייל הצטרפות": how to sign in with Google. Sent by the server from the saved details.
@@ -735,23 +768,11 @@ function renderClientAdminTab(tab){
     });
 
     document.getElementById('ca-expire-btn').addEventListener('click',function(){
-      const _name=p.name;
-      setTimeout(function(){
-        if(!confirm('לסיים את המנוי של '+_name+' עכשיו?'))return;
-        const p2=state.profiles[id];
-        p2.subscriptionEnd=new Date().toISOString();
-        p2.active=false;
-        sv();
-        dbSaveClient(id).then(()=>renderClientAdminTab('info')).catch(e=>console.warn(e));
-      },0);
+      adminEndSubscription(id).then(done=>{if(done)renderClientAdminTab('info');});
     });
 
     document.getElementById('ca-del-btn').addEventListener('click',function(){
-      const _name=p.name;
-      setTimeout(function(){
-        if(!confirm('למחוק את '+_name+' וכל הנתונים?'))return;
-        dbDeleteClient(id).then(()=>{delete state.profiles[id];sv();renderAdminTab('clients');}).catch(()=>{delete state.profiles[id];sv();renderAdminTab('clients');});
-      },0);
+      adminDeleteClient(id).then(done=>{if(done)renderAdminTab('clients');});
     });
   } else {
     const csvBtn=document.getElementById('ca-csv-btn');
@@ -785,10 +806,13 @@ function createP(){
   const btnC=document.querySelector('#s-new .action-btn');
   if(btnC){btnC.textContent='יוצר...';btnC.disabled=true;}
   dbCreateClient(name,loginEmail,subEnd).then(function(newId){
-    if(!newId){if(btnC){btnC.textContent='צור פרופיל';btnC.disabled=false;}return;}
     state.profiles[newId]={name,accounts:DEFA(),log:[],lastIncome:'',email:'',reminderEnabled:false,subscriptionEnd:subEnd,active:true,loginEmail,linked:false,dbId:newId};
     sv();renderAdminTab('clients');
-  }).catch(function(){if(btnC){btnC.textContent='צור פרופיל';btnC.disabled=false;}});
+  }).catch(function(e){
+    console.warn('create client:',e);
+    err.style.display='block';err.textContent='יצירת הפרופיל נכשלה. נסה שוב.';
+    if(btnC){btnC.textContent='צור פרופיל';btnC.disabled=false;}
+  });
 }
 
 
@@ -822,7 +846,7 @@ function buildApp(){
   activeTab=isFirstLogin?'profile':'alloc';
   document.getElementById('s-app').innerHTML=
     '<div class="topbar"><button class="btn-out" onclick="signOut()">← יציאה</button>'
-    +'<span class="tbtitle" style="margin-right:8px;">'+p.name+'</span>'
+    +'<span class="tbtitle" style="margin-right:8px;">'+esc(p.name)+'</span>'
     +'<span class="badge badge-c">לקוח</span></div>'
     +'<div class="tab-bar">'
     +'<button class="tab "+(activeTab==="alloc"?"on":"")+" " id="tab-alloc" onclick="setTab(\'alloc\')">מחשבון חלוקה</button>'
@@ -833,6 +857,7 @@ function buildApp(){
   show('app');renderTab();
 }
 function setTab(t){
+  flushAccounts();
   activeTab=t;
   document.querySelectorAll('.tab').forEach(b=>b.classList.remove('on'));
   const tb=document.getElementById('tab-'+t);if(tb)tb.classList.add('on');
@@ -856,10 +881,10 @@ function buildProfileUI(container){
     +'</div></div></div>'
     // Business name
     +'<div class="ig"><label>שם העסק</label>'
-    +'<input type="text" id="prf-biz" value="'+(p.businessName||'')+'" placeholder="שם העסק שלך" autocomplete="organization"></div>'
+    +'<input type="text" id="prf-biz" value="'+esc(p.businessName)+'" placeholder="שם העסק שלך" autocomplete="organization"></div>'
     // Email
     +'<div class="ig"><label>כתובת אימייל</label>'
-    +'<input type="email" id="prf-email" value="'+(p.email||'')+'" placeholder="your@email.com" autocomplete="email"></div>'
+    +'<input type="email" id="prf-email" value="'+esc(p.email)+'" placeholder="your@email.com" autocomplete="email"></div>'
     // Separator
     +'<div style="border-top:1px solid var(--color-border-tertiary);margin:16px 0;"></div>'
     // Notifications
@@ -910,7 +935,7 @@ function buildProfileUI(container){
       const msg=document.getElementById('prf-msg');
       if(msg){msg.classList.add('toast-on');msg.textContent='✓ השינויים נשמרו בהצלחה';setTimeout(()=>msg.classList.remove('toast-on'),3000);}
     }).catch(e=>{
-      console.warn(e);
+      saveFailed(e);
       if(btn){btn.textContent='שמור שינויים';btn.disabled=false;}
     });
   });
@@ -1041,7 +1066,7 @@ function buildReminderUI(container){
     dbSaveClient(curId).then(()=>{
       const msg=document.getElementById('rem-msg');
       if(msg){msg.classList.add('toast-on');msg.textContent='✓ מועדי החלוקות נשמרו';setTimeout(()=>msg.classList.remove('toast-on'),3000);}
-    }).catch(e=>console.warn(e));
+    }).catch(saveFailed);
   });
 }
 
@@ -1085,10 +1110,18 @@ function buildAllocUI(container){
     const p=gP(),oi=p.accounts.findIndex(a=>a.id==='op');
     const n={id:'c'+(++custN),name:'',type:'pct',value:''};
     if(oi>-1)p.accounts.splice(oi,0,n);else p.accounts.push(n);
-    sv();buildRows();
+    sv();saveAccountsSoon();buildRows();
   });
   document.getElementById('btn-exec').addEventListener('click',saveAlloc);
 }
+
+// Account changes are saved a second after the last keystroke (names and amounts), or at once
+// (type, delete). One timer for all rows, so a quick edit in another row is not lost.
+let accSaveTimer=null;
+function saveAccountsNow(){clearTimeout(accSaveTimer);accSaveTimer=null;return dbSaveClient(curId).catch(saveFailed);}
+// Before leaving the tab or signing out: send a save that is still waiting for its second.
+function flushAccounts(){return accSaveTimer?saveAccountsNow():Promise.resolve();}
+function saveAccountsSoon(){clearTimeout(accSaveTimer);accSaveTimer=setTimeout(saveAccountsNow,1000);}
 
 function applyToggleStyle(btnPct,btnIls,isPct){
   btnPct.setAttribute('style',(isPct?STYLE_PCT_ON:STYLE_PCT_OFF)+'padding:5px 10px;font-size:12px;font-weight:'+(isPct?'700':'600')+';border-radius:6px;cursor:pointer;');
@@ -1115,15 +1148,15 @@ function buildRows(){
     const nc=document.createElement('div');nc.className='nc';
     const dot=document.createElement('div');dot.className='dot';dot.style.background=cl(i);nc.appendChild(dot);
     if(isFixed){const sp=document.createElement('span');sp.className='ntxt';sp.textContent=a.name;nc.appendChild(sp);}
-    else{const inp=document.createElement('input');inp.className='ninp';inp.type='text';inp.value=a.name;inp.placeholder='שם חשבון';inp.addEventListener('input',()=>{gP().accounts[i].name=inp.value;sv();});nc.appendChild(inp);}
+    else{const inp=document.createElement('input');inp.className='ninp';inp.type='text';inp.value=a.name;inp.placeholder='שם חשבון';inp.addEventListener('input',()=>{gP().accounts[i].name=inp.value;sv();saveAccountsSoon();});nc.appendChild(inp);}
     tdN.appendChild(nc);
     const tdT=document.createElement('td');
     const tw=document.createElement('div');tw.className='twrap';
     const bP=document.createElement('button');bP.textContent='%';
     const bI=document.createElement('button');bI.textContent='₪';
     applyToggleStyle(bP,bI,isPct);
-    bP.addEventListener('click',()=>{const p=gP();p.accounts[i].type='pct';p.accounts[i].value='';sv();dbSaveClient(curId).catch(e=>console.warn(e));buildRows();});
-    bI.addEventListener('click',()=>{const p=gP();p.accounts[i].type='amt';p.accounts[i].value='';sv();dbSaveClient(curId).catch(e=>console.warn(e));buildRows();});
+    bP.addEventListener('click',()=>{const p=gP();p.accounts[i].type='pct';p.accounts[i].value='';sv();saveAccountsNow();buildRows();});
+    bI.addEventListener('click',()=>{const p=gP();p.accounts[i].type='amt';p.accounts[i].value='';sv();saveAccountsNow();buildRows();});
     tw.appendChild(bP);tw.appendChild(bI);tdT.appendChild(tw);
     const tdA=document.createElement('td');
     const wrap=document.createElement('div');wrap.className='awrap';
@@ -1131,10 +1164,10 @@ function buildRows(){
     const ainp=document.createElement('input');ainp.className='ainp';ainp.type='number';ainp.min='0';ainp.step=isPct?'0.1':'1';
     if(isPct)ainp.max='100';
     ainp.value=a.value;ainp.placeholder='0';
-    ainp.addEventListener('input',()=>{gP().accounts[i].value=ainp.value;sv();clearTimeout(ainp._dbt);ainp._dbt=setTimeout(()=>dbSaveClient(curId).catch(e=>console.warn(e)),1000);refreshDisplay();});
+    ainp.addEventListener('input',()=>{gP().accounts[i].value=ainp.value;sv();saveAccountsSoon();refreshDisplay();});
     wrap.appendChild(sym);wrap.appendChild(ainp);tdA.appendChild(wrap);
     const tdD=document.createElement('td');
-    if(!isFixed){const db=document.createElement('button');db.className='del-btn';db.textContent='×';db.addEventListener('click',()=>{gP().accounts.splice(i,1);sv();dbSaveClient(curId).catch(e=>console.warn(e));buildRows();});tdD.appendChild(db);}
+    if(!isFixed){const db=document.createElement('button');db.className='del-btn';db.textContent='×';db.addEventListener('click',()=>{gP().accounts.splice(i,1);sv();saveAccountsNow();buildRows();});tdD.appendChild(db);}
     tr.appendChild(tdN);tr.appendChild(tdT);tr.appendChild(tdA);tr.appendChild(tdD);
     tbody.appendChild(tr);
   });
@@ -1155,15 +1188,17 @@ function refreshDisplay(){
     if(inc>0){
       prev.style.display='block';
       const segs=allocs.map(a=>'<div class="bseg" style="width:'+Math.max(0,a.pct).toFixed(2)+'%;background:'+a.color+';"></div>').join('');
-      const rows=allocs.map(a=>'<div class="prow"><div class="dot" style="background:'+a.color+';"></div><div class="prname">'+a.name+'</div><div class="prpct">'+Number(a.pct).toFixed(1)+'%</div><div class="pramt">'+fIls(a.amount)+'</div></div>').join('');
+      const rows=allocs.map(a=>'<div class="prow"><div class="dot" style="background:'+a.color+';"></div><div class="prname">'+esc(a.name)+'</div><div class="prpct">'+Number(a.pct).toFixed(1)+'%</div><div class="pramt">'+fIls(a.amount)+'</div></div>').join('');
       prev.innerHTML='<div class="prev-lbl">תצוגה מקדימה</div><div class="bar-track">'+segs+'</div>'+rows;
     }else prev.style.display='none';
   }
 }
 
-function saveAlloc(){
+async function saveAlloc(){
   const p=gP();const inc=parseFloat(p.lastIncome||0);
   if(!inc){alert('נא להזין סכום הכנסות');return;}
+  const btn=document.getElementById('btn-exec');
+  if(btn&&btn.disabled)return; // a second tap while saving would log the allocation twice
   const results=calcAllocs(p.accounts,inc);
   const now=new Date();
   if(!p.log)p.log=[];
@@ -1174,13 +1209,22 @@ function saveAlloc(){
   const mn=String(now.getMinutes()).padStart(2,'0');
   const dateStr=mm+'/'+dd+'/'+yyyy;
   const timeStr=hh+':'+mn;
-  p.log.unshift({date:dateStr,dateNum:dateStr,time:timeStr,income:inc,results});
-  sv();
-  const entry=p.log[0];
-  dbSaveAllocation(curId,entry).catch(e=>console.warn(e));
-  dbSaveClient(curId).catch(e=>console.warn(e));
-  sendConfirmation(curId,entry);
+  const entry={date:dateStr,dateNum:dateStr,time:timeStr,income:inc,results};
+  if(btn){btn.disabled=true;btn.textContent='שומר...';}
   const toast=document.getElementById('toast');
+  if(toast)toast.classList.remove('toast-on');
+  try{await dbSaveAllocation(curId,entry);}
+  catch(e){
+    console.warn('save allocation:',e);
+    if(btn){btn.disabled=false;btn.textContent='בצע חלוקה';}
+    alert('החלוקה לא נשמרה ביומן. בדוק את החיבור לאינטרנט ונסה שוב.');
+    return;
+  }
+  if(btn){btn.disabled=false;btn.textContent='בצע חלוקה';}
+  p.log.unshift(entry);
+  sv();
+  dbSaveClient(curId).catch(e=>console.warn('save last income:',e));
+  sendConfirmation(curId,entry);
   if(toast){toast.classList.add('toast-on');setTimeout(()=>toast.classList.remove('toast-on'),3000);}
   const lt=document.getElementById('tab-log');if(lt)lt.textContent='יומן ('+p.log.length+')';
 }
@@ -1191,16 +1235,17 @@ function buildLogUI(container){
   let html='<div class="exp-bar"><button class="ebtn" id="btn-csv">ייצוא CSV</button><button class="ebtn" id="btn-pdf">ייצוא PDF</button><button class="btn-red" id="btn-clr">נקה יומן</button></div>';
   log.forEach(e=>{
     let rr='';
-    e.results.forEach(r=>{rr+='<div class="lrow"><span class="lln"><span style="width:6px;height:6px;border-radius:50%;background:'+r.color+';display:inline-block;margin-left:4px;"></span>'+r.name+'</span><span class="lla">'+fIls(r.amount)+' <span class="lsub">('+Number(r.pct).toFixed(1)+'%)</span></span></div>';});
-    html+='<div class="log-entry"><div class="lhdr"><span class="ldate">'+e.date+' · '+e.time+'</span><span class="linc">'+fIls(e.income)+'</span></div>'+rr+'</div>';
+    e.results.forEach(r=>{rr+='<div class="lrow"><span class="lln"><span style="width:6px;height:6px;border-radius:50%;background:'+safeColor(r.color)+';display:inline-block;margin-left:4px;"></span>'+esc(r.name)+'</span><span class="lla">'+fIls(r.amount)+' <span class="lsub">('+Number(r.pct).toFixed(1)+'%)</span></span></div>';});
+    html+='<div class="log-entry"><div class="lhdr"><span class="ldate">'+esc(e.date)+' · '+esc(e.time)+'</span><span class="linc">'+fIls(e.income)+'</span></div>'+rr+'</div>';
   });
   container.innerHTML=html;
   document.getElementById('btn-csv').onclick=()=>doCSV(p);
   document.getElementById('btn-pdf').onclick=()=>runPDF(p);
   document.getElementById('btn-clr').onclick=()=>{
     if(!confirm('למחוק את כל יומן ההקצאות?'))return;
-    sbDelete('allocations','?client_id=eq.'+curId).catch(e=>console.warn(e));
-    gP().log=[];sv();renderTab();
+    sbDelete('allocations','?client_id=eq.'+curId)
+      .then(rows=>{if(!rows.length)throw new Error('nothing deleted');gP().log=[];sv();renderTab();})
+      .catch(e=>{console.warn('clear log:',e);alert('מחיקת היומן נכשלה. נסה שוב.');});
   };
 }
 
