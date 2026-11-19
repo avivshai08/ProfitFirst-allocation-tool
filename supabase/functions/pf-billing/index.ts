@@ -3,7 +3,8 @@
 //   {action:"cancel"}  — signed-in client: cancel their standing order (ביטול מנוי)
 //   {action:"daily"}   — scheduled job (header x-cron-secret): see logic.ts runDaily
 // Secrets (Supabase → Edge Functions → Secrets): SUMIT_COMPANY_ID, SUMIT_API_KEY,
-// PF_SUMIT_ITEM_ID (this tool's catalog item in SUMIT), PF_CRON_SECRET.
+// PF_SUMIT_ITEM_ID (this tool's catalog item in SUMIT), PF_CRON_SECRET, RESEND_API_KEY (the
+// signup and cancellation emails, see emails.ts; without it billing still works, unannounced).
 // SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are provided by Supabase.
 import { createClient } from 'npm:@supabase/supabase-js@2.119.0';
 import {
@@ -11,12 +12,14 @@ import {
   type ClientRow,
   type Clients,
   confirmSignup,
+  type Notify,
   type RecurringItem,
   runDaily,
   STATUS,
   type Sumit,
   type SumitCustomer,
 } from './logic.ts';
+import { adminCancelledEmail, adminSignupEmail, cancelledEmail, type Email, FROM, welcomeEmail } from './emails.ts';
 
 const env = (name: string) => (Deno.env.get(name) ?? '').trim();
 const CORS = {
@@ -85,8 +88,27 @@ const sumit: Sumit = {
   },
 };
 
+async function send(email: Email) {
+  if (!email.to) throw new Error('no address');
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${env('RESEND_API_KEY')}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: FROM, to: email.to, subject: email.subject, html: email.html }),
+  });
+  if (!res.ok) throw new Error(`Resend: HTTP ${res.status} ${await res.text()}`);
+}
+/** Sends all, then reports any that failed (one failed address does not stop the others). */
+async function sendAll(emails: Email[]) {
+  const failed = (await Promise.allSettled(emails.map(send))).filter((r) => r.status === 'rejected');
+  if (failed.length) throw new Error(failed.map((r) => String((r as PromiseRejectedResult).reason)).join('; '));
+}
+const notify: Notify = {
+  signedUp: (row, firstCharge) => sendAll([welcomeEmail(row, firstCharge), adminSignupEmail(row, firstCharge)]),
+  cancelled: (row, accessUntil, by) => sendAll([cancelledEmail(row, accessUntil), adminCancelledEmail(row, accessUntil, by)]),
+};
+
 const db = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { auth: { persistSession: false } });
-const COLUMNS = 'id,name,email,login_email,signup_source,sumit_customer_id,awaiting_payment,subscription_end,sumit_end_date,subscription_cancelled_at,created_at';
+const COLUMNS = 'id,name,email,login_email,phone,signup_source,sumit_customer_id,awaiting_payment,subscription_end,sumit_end_date,subscription_cancelled_at,created_at';
 async function rows(query: PromiseLike<{ data: unknown; error: unknown }>): Promise<ClientRow[]> {
   const { data, error } = await query;
   if (error) throw new Error(JSON.stringify(error));
@@ -118,7 +140,7 @@ Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
   const productItemId = Number(env('PF_SUMIT_ITEM_ID'));
   if (!env('SUMIT_COMPANY_ID') || !env('SUMIT_API_KEY') || !productItemId) return reply({ error: 'not_configured' }, 503);
-  const deps = { clients, sumit, productItemId };
+  const deps = { clients, sumit, productItemId, notify };
   let action = '';
   try { action = (await req.json()).action; } catch { /* empty body */ }
 

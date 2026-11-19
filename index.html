@@ -625,7 +625,7 @@ function renderClientAdminTab(tab){
       // checked daily only once its SUMIT customer number is entered.
       +'<div style="font-size:12px;color:#555;margin-bottom:8px;line-height:1.8;">מקור: <strong>'+(p.signupSource==='self'?'הרשמה עצמית':'נוסף ע״י מנהל')+'</strong>'
       +(p.phone?' · טלפון: <span dir="ltr">'+p.phone+'</span>':'')
-      +(p.cancelledAt?'<br>המנוי בוטל ע״י הלקוח ב־'+new Date(p.cancelledAt).toLocaleDateString('he-IL'):'')+'</div>'
+      +(p.cancelledAt?'<br>המנוי בוטל ב־'+new Date(p.cancelledAt).toLocaleDateString('he-IL'):'')+'</div>'
       +'<div class="ig"><label>'+(p.signupSource==='self'?'מספר לקוח SUMIT (רק אם התשלום נרשם על כרטיס לקוח קיים)':'מספר לקוח SUMIT (הוראת קבע; ריק = ניהול ידני)')+'</label>'
       +'<input type="text" id="ca-sumit" dir="ltr" inputmode="numeric" value="'+(p.sumitCustomerId||'')+'"></div>'
       // Google sign-in
