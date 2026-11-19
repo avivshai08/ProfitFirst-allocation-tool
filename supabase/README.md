@@ -61,7 +61,7 @@ that matches no client gets the signup screen instead.
 - **Sees the signup screen instead of their data**: their Google email does not match. In admin, set their אימייל לכניסה to the Google email they use; they press "כניסה עם חשבון Google אחר" or sign in again.
 - **"יותר מפרופיל אחד"**: two clients share that email. Give each a different אימייל לכניסה.
 - **Linked to the wrong account**: in admin, נתק חשבון Google, fix the email, they sign in again. Their data is not touched.
-- **Paid but still "ההרשמה כמעט הושלמה"**: the daily check retries for 7 days. If SUMIT filed the payment under an existing customer card (e.g. someone who is also a MoneySystem customer), enter that card's number in admin (מספר לקוח SUMIT); the client presses "כבר שילמתי — בדוק שוב".
+- **Paid but still "ההרשמה כמעט הושלמה"**: the daily check retries for 7 days. The payment is found by the client's Google email, then by their phone, on whichever SUMIT card holds it. If they changed both on SUMIT's payment page, enter that card's number in admin (מספר לקוח SUMIT); the client presses "כבר שילמתי — בדוק שוב".
 
 ## Billing rules (same as MoneySystem)
 

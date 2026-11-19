@@ -54,8 +54,18 @@ async function sumitCall<T>(path: string, body: Record<string, unknown>): Promis
   }
   return json.Data as T;
 }
-const customerRef = (c: SumitCustomer) =>
-  'externalId' in c ? { ExternalIdentifier: c.externalId, SearchMode: 2 } : { ID: Number(c.customerId), SearchMode: 1 };
+// By customer number only: a search by external identifier creates an empty card when
+// nothing matches. The customers/list lookups below only read.
+const customerRef = (c: SumitCustomer) => ({ ID: Number(c.customerId), SearchMode: 1 });
+async function customerIds(filter: { EmailAddress: string } | { PhoneNumber: string }, label: string) {
+  const data = await sumitCall<{ Customers?: Array<Record<string, any>> | null }>(
+    '/accounting/customers/list/',
+    { ...filter, Paging: { StartIndex: 0, PageSize: 20 } },
+  );
+  const ids = (data?.Customers ?? []).map((c) => String(c.ID)).filter((id) => /^\d+$/.test(id));
+  console.log(`sumit customers by ${label}: ${ids.join(', ') || 'none'}`);
+  return ids;
+}
 
 const sumit: Sumit = {
   async list(customer, includeInactive) {
@@ -74,15 +84,8 @@ const sumit: Sumit = {
     console.log(`sumit list ${JSON.stringify(customer)}: ${items.map((i) => `item ${i.itemId} status ${i.status}`).join(', ') || 'none'}`);
     return items;
   },
-  async customerIdsByEmail(email) {
-    const data = await sumitCall<{ Customers?: Array<Record<string, any>> | null }>(
-      '/accounting/customers/list/',
-      { EmailAddress: email, Paging: { StartIndex: 0, PageSize: 20 } },
-    );
-    const ids = (data?.Customers ?? []).map((c) => String(c.ID)).filter((id) => /^\d+$/.test(id));
-    console.log(`sumit customers by email: ${ids.join(', ') || 'none'}`);
-    return ids;
-  },
+  customerIdsByEmail: (email) => customerIds({ EmailAddress: email }, 'email'),
+  customerIdsByPhone: (phone) => customerIds({ PhoneNumber: phone }, 'phone'),
   async cancel(customer, recurringItemId) {
     await sumitCall('/billing/recurring/cancel/', { Customer: customerRef(customer), RecurringCustomerItemID: recurringItemId });
   },
@@ -100,7 +103,7 @@ async function send(email: Email) {
 /** Sends all, then reports any that failed (one failed address does not stop the others). */
 async function sendAll(emails: Email[]) {
   const failed = (await Promise.allSettled(emails.map(send))).filter((r) => r.status === 'rejected');
-  if (failed.length) throw new Error(failed.map((r) => String((r as PromiseRejectedResult).reason)).join('; '));
+  if (failed.length) throw new Error(failed.map((r) => ((r as PromiseRejectedResult).reason as Error)?.message ?? String((r as PromiseRejectedResult).reason)).join('; '));
 }
 const notify: Notify = {
   signedUp: (row, firstCharge) => sendAll([welcomeEmail(row, firstCharge), adminSignupEmail(row, firstCharge)]),
@@ -122,10 +125,7 @@ const clients: Clients = {
     return rows(db.from('clients').select(COLUMNS).eq('awaiting_payment', true).gte('created_at', isoDate));
   },
   billed() {
-    return rows(
-      db.from('clients').select(COLUMNS).eq('awaiting_payment', false)
-        .or('signup_source.eq.self,sumit_customer_id.not.is.null'),
-    );
+    return rows(db.from('clients').select(COLUMNS).eq('awaiting_payment', false).not('sumit_customer_id', 'is', null));
   },
   async update(id, values) {
     const { error } = await db.from('clients').update(values).eq('id', id);

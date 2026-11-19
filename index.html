@@ -133,8 +133,9 @@ const PAYMENT_URL='https://pay.sumit.co.il/8r3u23/x4oqsu/x4oqyg/payment/';
 const BILLING_FN=SB_URL+'/functions/v1/quick-task';
 const PRICE_TEXT='25 ₪ + מע״מ לחודש · 30 הימים הראשונים ללא תשלום';
 async function billing(action){const r=await fetch(BILLING_FN,{method:'POST',headers:{...await sbHeaders(),'Content-Type':'application/json'},body:JSON.stringify({action})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j;}
-// Prefilled and tagged with our client id; SUMIT stores it on the customer, which is how
-// the billing function finds the payment (nothing in the return address is trusted).
+// Prefilled with the verified Google email and phone, by which the billing function finds the
+// payment in SUMIT (read-only lookups; nothing in the return address is trusted). The tag is
+// informational only: SUMIT does not keep it on the customer card.
 function paymentUrl(clientId,name,phone){
   const u=new URL(PAYMENT_URL);
   u.searchParams.set('name',name);u.searchParams.set('emailaddress',state.authEmail||'');u.searchParams.set('phone',phone||'');
@@ -626,7 +627,7 @@ function renderClientAdminTab(tab){
       +'<div style="font-size:12px;color:#555;margin-bottom:8px;line-height:1.8;">מקור: <strong>'+(p.signupSource==='self'?'הרשמה עצמית':'נוסף ע״י מנהל')+'</strong>'
       +(p.phone?' · טלפון: <span dir="ltr">'+p.phone+'</span>':'')
       +(p.cancelledAt?'<br>המנוי בוטל ב־'+new Date(p.cancelledAt).toLocaleDateString('he-IL'):'')+'</div>'
-      +'<div class="ig"><label>'+(p.signupSource==='self'?'מספר לקוח SUMIT (רק אם התשלום נרשם על כרטיס לקוח קיים)':'מספר לקוח SUMIT (הוראת קבע; ריק = ניהול ידני)')+'</label>'
+      +'<div class="ig"><label>'+(p.signupSource==='self'?'מספר לקוח SUMIT (נשמר אוטומטית כשהתשלום אושר)':'מספר לקוח SUMIT (הוראת קבע; ריק = ניהול ידני)')+'</label>'
       +'<input type="text" id="ca-sumit" dir="ltr" inputmode="numeric" value="'+(p.sumitCustomerId||'')+'"></div>'
       // Google sign-in
       +'<div class="lbl" style="margin:14px 0 8px;">כניסה עם Google</div>'

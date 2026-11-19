@@ -34,8 +34,11 @@ export type RecurringItem = {
 };
 export type BillingState = 'paying' | 'failing' | 'cancelled' | 'unknown';
 
-/** Which SUMIT customer: a self-signup by our client id, an admin-added client by customer number. */
-export type SumitCustomer = { externalId: string } | { customerId: string };
+/**
+ * A SUMIT customer, always by customer number. Never by external identifier: SUMIT creates
+ * an empty customer card when that finds no match (seen in the real tests, 2026-11-19).
+ */
+export type SumitCustomer = { customerId: string };
 
 export type ClientRow = {
   id: string;
@@ -56,8 +59,10 @@ export type ClientRow = {
 export interface Sumit {
   list(customer: SumitCustomer, includeInactive: boolean): Promise<RecurringItem[]>;
   cancel(customer: SumitCustomer, recurringItemId: number): Promise<void>;
-  /** SUMIT customer numbers whose email is exactly this address. */
+  /** SUMIT customer numbers whose email is exactly this address (only reads). */
   customerIdsByEmail(email: string): Promise<string[]>;
+  /** SUMIT customer numbers whose phone is exactly this number (only reads). */
+  customerIdsByPhone(phone: string): Promise<string[]>;
 }
 export interface Clients {
   byUserId(userId: string): Promise<ClientRow | null>;
@@ -84,14 +89,12 @@ async function quietly(deps: Deps, what: string, send: () => Promise<void> | und
   }
 }
 
-/** A self-signup's SUMIT customer carries this as its external identifier. */
-export function externalIdOf(clientId: string) {
-  return 'pf-' + clientId;
-}
-
-export function sumitCustomerOf(row: Pick<ClientRow, 'id' | 'signup_source' | 'sumit_customer_id'>): SumitCustomer | null {
-  if (row.sumit_customer_id) return { customerId: row.sumit_customer_id };
-  return row.signup_source === 'self' ? { externalId: externalIdOf(row.id) } : null;
+/**
+ * The client's SUMIT customer: the number saved when their signup was confirmed, or entered
+ * by the admin. Without one the client is managed by hand and never sent to SUMIT.
+ */
+export function sumitCustomerOf(row: Pick<ClientRow, 'sumit_customer_id'>): SumitCustomer | null {
+  return row.sumit_customer_id ? { customerId: row.sumit_customer_id } : null;
 }
 
 /** Only this tool's catalog item counts: the same SUMIT account also bills MoneySystem. */
@@ -185,40 +188,48 @@ function asColumns(next: EndDates) {
 
 /**
  * Opens access for a signup awaiting payment once SUMIT shows a paying order for this
- * tool's item. The customer is found by our client id (the payment page's
- * customerexternalidentifier), or by the customer number the admin entered. SUMIT may
- * instead file the payment under an existing customer card (seen in the first real test,
- * 2026-11-18), so as a fallback the customers with the client's verified Google email are
- * checked; the customer number found there is saved, so later checks and cancelling use it.
+ * tool's item. The customer card is the one the admin entered, or else found by the
+ * client's verified Google email and then by their phone (both prefilled on the payment
+ * page). These lookups only read: SUMIT may file the payment under a new or an existing
+ * card. The customer number found is saved, so later checks and cancelling use it.
  */
 export async function confirmSignup(row: ClientRow, deps: Deps) {
   if (!row.awaiting_payment) return true;
-  const customer = sumitCustomerOf(row) ?? { externalId: externalIdOf(row.id) };
-  let items = ofThisProduct(await deps.sumit.list(customer, false), deps.productItemId);
-  let foundCustomerId: string | null = null;
-  if (billingState(items) !== 'paying' && !row.sumit_customer_id && row.login_email) {
-    for (const customerId of await deps.sumit.customerIdsByEmail(row.login_email)) {
-      const found = ofThisProduct(await deps.sumit.list({ customerId }, false), deps.productItemId);
-      if (billingState(found) === 'paying') {
-        items = found;
-        foundCustomerId = customerId;
-        break;
-      }
-    }
-  }
-  if (billingState(items) !== 'paying') return false;
+  const found = await payingCustomer(row, deps);
+  if (!found) return false;
   await deps.clients.update(row.id, {
     awaiting_payment: false, active: true, subscription_end: null, sumit_end_date: null,
-    ...(foundCustomerId ? { sumit_customer_id: foundCustomerId } : {}),
+    sumit_customer_id: found.customerId,
   });
   // During the free month SUMIT's first payment date (Date_Start) is the first charge.
-  const trial = items.find((item) => item.status === STATUS.PendingForFirstPayment);
-  const opened = { ...row, awaiting_payment: false, sumit_customer_id: foundCustomerId ?? row.sumit_customer_id };
+  const trial = found.items.find((item) => item.status === STATUS.PendingForFirstPayment);
+  const opened = { ...row, awaiting_payment: false, sumit_customer_id: found.customerId };
   await quietly(deps, `signup ${row.id}`, () => deps.notify?.signedUp(opened, trial?.firstBilling ?? null));
   return true;
 }
 
-export type CancelResult = { ok: true; endDate: string | null } | { ok: false; error: string };
+async function payingCustomer(row: ClientRow, deps: Deps): Promise<{ customerId: string; items: RecurringItem[] } | null> {
+  const tried = new Set<string>();
+  const check = async (customerId: string) => {
+    if (tried.has(customerId)) return null;
+    tried.add(customerId);
+    const items = ofThisProduct(await deps.sumit.list({ customerId }, false), deps.productItemId);
+    return billingState(items) === 'paying' ? { customerId, items } : null;
+  };
+  if (row.sumit_customer_id) return check(row.sumit_customer_id);
+  const lookups: Array<() => Promise<string[]>> = [];
+  if (row.login_email) lookups.push(() => deps.sumit.customerIdsByEmail(row.login_email!));
+  if (row.phone) lookups.push(() => deps.sumit.customerIdsByPhone(row.phone!));
+  for (const lookup of lookups) {
+    for (const customerId of await lookup()) {
+      const found = await check(customerId);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+export type CancelResult ={ ok: true; endDate: string | null } | { ok: false; error: string };
 
 /** The client's own cancellation: stops future charges; access runs to the end of the paid period. */
 export async function cancelSubscription(row: ClientRow, today: string, deps: Deps): Promise<CancelResult> {
@@ -240,8 +251,8 @@ export type DailyResult = { opened: number; changed: number; failed: number };
 
 /**
  * Daily: opens recent signups whose payment went through without returning to the tool,
- * then applies nextEndDates to every SUMIT-billed client. Clients the admin manages by
- * hand (no self-signup, no customer number) are never looked at. One client's error is
+ * then applies nextEndDates to every client with a SUMIT customer number. Clients the
+ * admin manages by hand (no customer number) are never looked at. One client's error is
  * logged and skipped, never applied.
  */
 export async function runDaily(today: string, deps: Deps): Promise<DailyResult> {
@@ -257,7 +268,8 @@ export async function runDaily(today: string, deps: Deps): Promise<DailyResult> 
   }
   for (const row of await deps.clients.billed()) {
     try {
-      const customer = sumitCustomerOf(row)!;
+      const customer = sumitCustomerOf(row);
+      if (!customer) continue;
       const items = ofThisProduct(await deps.sumit.list(customer, true), deps.productItemId);
       const state = billingState(items);
       const next = nextEndDates(currentDates(row), state, items, today);
