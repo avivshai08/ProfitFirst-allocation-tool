@@ -52,7 +52,7 @@ that matches no client gets the signup screen instead.
    The old site keeps working throughout.
 9. **Clients without a usable email** — the five listed on 2026-11-18 are test/inactive clients, so nothing to do; any client added before the cutover needs a Google email as אימייל לכניסה.
 10. **Cutover**, same hour: run `01_backup.sql` again with a new date suffix; publish the new site on Netlify (`index.html`, `terms.html`, `privacy.html`); run `03_cutover.sql`; replace the code of `bright-function` with `functions/bright-function/index.ts` and deploy (not earlier: the old site sends confirmations with the public key, which the new version refuses); run `05_billing_schedule.sql`. Then delete the old Resend key.
-11. **Tell clients**: "from now on, sign in with the Google account of <their email>". In admin, מחובר ל־Google appears as each one signs in.
+11. **Tell clients**: in admin, open each client and press **שלח מייל הצטרפות** (after the cutover, so the instructions are true). Clients who already have allocations get "sign-in moved to Google, your data is kept"; others get "you have access". It goes to their אימייל לכניסה (or else their email) and says which Google account to choose. In admin, מחובר ל־Google appears as each one signs in.
 
 **Undo the cutover:** `03_rollback.sql`, then re-publish the old `index.html` (commit `cd7fb41`: the live site of 2026-11-18 minus unused code, plus the admin password fix). `select cron.unschedule('pf-billing-daily');` stops the daily check. Paste `functions/_previous/bright-function.ts` back into `bright-function` (the old site needs it; it reads the `RESEND_API_KEY` secret). The new `smart-processor` works with the old site, so it can stay. No data is touched by any of these.
 
@@ -69,6 +69,7 @@ that matches no client gets the signup screen instead.
 - Failed charge: 5 more days, then access stops; a later successful charge restores it.
 - Cancel (client's ביטול מנוי, or in SUMIT): access to a month after the last payment, or to the end of the free month.
 - Emails (Resend, from and to aviv@bottomline.finance for the admin): when a signup is confirmed, the client gets a welcome (with the first charge date during the free month) and the admin a new-client notice; when a subscription is cancelled (the client in the tool, or found cancelled in SUMIT by the daily check) both get one, once. A failed email is logged in pf-billing → Logs and never blocks billing.
+- Clients the admin adds get no automatic email; the admin sends **שלח מייל הצטרפות** from the client card when ready (pf-billing `invite`, admin only, read from the saved details; not sent to a client without access).
 - An end date the admin set is never changed by the billing check. Clients the admin manages by hand (no online signup, no SUMIT customer number) are never sent to SUMIT.
 
 ## Tests

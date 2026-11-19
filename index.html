@@ -132,7 +132,7 @@ const PAYMENT_URL='https://pay.sumit.co.il/8r3u23/x4oqsu/x4oqyg/payment/';
 // Deployed from the dashboard as "pf-billing"; Supabase gave it the address quick-task.
 const BILLING_FN=SB_URL+'/functions/v1/quick-task';
 const PRICE_TEXT='25 ₪ + מע״מ לחודש · 30 הימים הראשונים ללא תשלום';
-async function billing(action){const r=await fetch(BILLING_FN,{method:'POST',headers:{...await sbHeaders(),'Content-Type':'application/json'},body:JSON.stringify({action})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j;}
+async function billing(action,extra){const r=await fetch(BILLING_FN,{method:'POST',headers:{...await sbHeaders(),'Content-Type':'application/json'},body:JSON.stringify({action,...(extra||{})})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j;}
 // Prefilled with the verified Google email and phone, by which the billing function finds the
 // payment in SUMIT (read-only lookups; nothing in the return address is trusted). The tag is
 // informational only: SUMIT does not keep it on the customer card.
@@ -634,7 +634,11 @@ function renderClientAdminTab(tab){
       +'<div style="font-size:12px;color:#555;margin-bottom:8px;">'+(p.linked?'✓ מחובר לחשבון Google':'טרם התחבר עם Google')+'</div>'
       +'<div class="ig"><label>אימייל לכניסה (ריק = האימייל שלמעלה)</label>'
       +'<input type="email" id="ca-login-email" dir="ltr" value="'+(p.loginEmail||'')+'" placeholder="'+(p.email||'')+'"></div>'
-      +(p.linked?'<button class="btn-sm" id="ca-unlink-btn" style="margin-bottom:12px;">נתק חשבון Google</button>':'')
+      +'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">'
+      +'<button class="btn-sm" id="ca-invite-btn">שלח מייל הצטרפות</button>'
+      +(p.linked?'<button class="btn-sm" id="ca-unlink-btn">נתק חשבון Google</button>':'')
+      +'</div>'
+      +'<div id="ca-invite-msg" style="display:none;margin-bottom:10px;"></div>'
       +'<div id="ca-msg" class="suc" style="display:none;margin-bottom:10px;"></div>'
       +'<button class="action-btn" id="ca-save-btn">שמור שינויים</button>'
       // Danger zone
@@ -703,6 +707,25 @@ function renderClientAdminTab(tab){
         const msg=document.getElementById('ca-msg');
         if(msg){msg.style.display='block';msg.textContent='✓ השינויים נשמרו';setTimeout(()=>{msg.style.display='none';renderClientAdminTab('info');},2000);}
       }).catch(e=>console.warn(e));
+    });
+
+    // "שלח מייל הצטרפות": how to sign in with Google. Sent by the server from the saved details.
+    document.getElementById('ca-invite-btn').addEventListener('click',async function(){
+      const p=state.profiles[id];
+      const out=document.getElementById('ca-invite-msg');
+      const say=(t,ok)=>{out.style.display='block';out.className=ok?'suc':'err';out.textContent=t;};
+      const typed=document.getElementById('ca-login-email').value.trim()||document.getElementById('ca-email').value.trim();
+      const saved=(p.loginEmail||p.email||'').trim();
+      if(!typed)return say('יש למלא אימייל לכניסה ולשמור לפני השליחה.',false);
+      if(typed!==saved)return say('יש לשמור את השינויים לפני השליחה.',false);
+      if(!confirm('לשלוח מייל הצטרפות אל '+saved+'?\nהמייל מסביר איך להיכנס לכלי עם חשבון Google של הכתובת הזו.'))return;
+      this.disabled=true;this.textContent='שולח...';
+      try{
+        const res=await billing('invite',{clientId:id});
+        if(res.ok)say('✓ נשלח אל '+res.to,true);
+        else say({no_email:'ללקוח אין אימייל לכניסה.',no_access:'ללקוח אין גישה פעילה (מנוי הסתיים או הושבת). עדכן תאריך סיום ושמור.',send_failed:'שליחת המייל נכשלה. נסה שוב מאוחר יותר.'}[res.error]||'השליחה נכשלה. נסה שוב.',false);
+      }catch(e){console.warn('invite:',e);say('השליחה נכשלה. נסה שוב.',false);}
+      this.disabled=false;this.textContent='שלח מייל הצטרפות';
     });
 
     const unlinkBtn=document.getElementById('ca-unlink-btn');

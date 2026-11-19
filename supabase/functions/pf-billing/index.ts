@@ -2,6 +2,7 @@
 //   {action:"confirm"} — signed-in client: open access once SUMIT shows their order (after payment)
 //   {action:"cancel"}  — signed-in client: cancel their standing order (ביטול מנוי)
 //   {action:"daily"}   — scheduled job (header x-cron-secret): see logic.ts runDaily
+//   {action:"invite", clientId} — admin only: "שלח מייל הצטרפות" to a client (how to sign in)
 // Secrets (Supabase → Edge Functions → Secrets): SUMIT_COMPANY_ID, SUMIT_API_KEY,
 // PF_SUMIT_ITEM_ID (this tool's catalog item in SUMIT), PF_CRON_SECRET, RESEND_API_KEY (the
 // signup and cancellation emails, see emails.ts; without it billing still works, unannounced).
@@ -19,7 +20,16 @@ import {
   type Sumit,
   type SumitCustomer,
 } from './logic.ts';
-import { adminCancelledEmail, adminSignupEmail, cancelledEmail, type Email, FROM, welcomeEmail } from './emails.ts';
+import {
+  adminCancelledEmail,
+  adminSignupEmail,
+  cancelledEmail,
+  type Email,
+  FROM,
+  inviteEmail,
+  signInAddress,
+  welcomeEmail,
+} from './emails.ts';
 
 const env = (name: string) => (Deno.env.get(name) ?? '').trim();
 const CORS = {
@@ -136,13 +146,44 @@ const clients: Clients = {
 /** Today in Israel, YYYY-MM-DD. */
 const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jerusalem' }).format(new Date());
 
+/** Same rule as the database's pf_is_admin(): a verified email listed in pf_admins. */
+async function isAdmin(user: { email?: string; email_confirmed_at?: string | null }) {
+  if (!user.email || !user.email_confirmed_at) return false;
+  const { data, error } = await db.from('pf_admins').select('email');
+  if (error) throw new Error(JSON.stringify(error));
+  return ((data ?? []) as Array<{ email: string }>).some((a) => a.email.toLowerCase() === user.email!.toLowerCase());
+}
+
+/** The admin's "שלח מייל הצטרפות": the client's details are read here, never taken from the page. */
+async function invite(clientId: string) {
+  const { data, error } = await db.from('clients')
+    .select('name,email,login_email,sumit_customer_id,subscription_end,active').eq('id', clientId).limit(1);
+  if (error) throw new Error(JSON.stringify(error));
+  const c = (data ?? [])[0] as (ClientRow & { active: boolean | null }) | undefined;
+  if (!c) return { ok: false, error: 'no_client' };
+  if (!signInAddress(c)) return { ok: false, error: 'no_email' };
+  const accessUntil = c.subscription_end ? c.subscription_end.slice(0, 10) : null;
+  if (c.active === false || (accessUntil && accessUntil < today())) return { ok: false, error: 'no_access' };
+  const used = await db.from('allocations').select('*', { count: 'exact', head: true }).eq('client_id', clientId);
+  if (used.error) throw new Error(JSON.stringify(used.error));
+  const email = inviteEmail(c, accessUntil, (used.count ?? 0) > 0);
+  try {
+    await send(email);
+  } catch (e) {
+    console.error(`email invite ${clientId}: ${(e as Error).message ?? e}`);
+    return { ok: false, error: 'send_failed' };
+  }
+  return { ok: true, to: email.to };
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
   const productItemId = Number(env('PF_SUMIT_ITEM_ID'));
   if (!env('SUMIT_COMPANY_ID') || !env('SUMIT_API_KEY') || !productItemId) return reply({ error: 'not_configured' }, 503);
   const deps = { clients, sumit, productItemId, notify };
-  let action = '';
-  try { action = (await req.json()).action; } catch { /* empty body */ }
+  let body: { action?: string; clientId?: string } = {};
+  try { body = await req.json(); } catch { /* empty body */ }
+  const action = String(body.action ?? '');
 
   try {
     if (action === 'daily') {
@@ -152,6 +193,10 @@ Deno.serve(async (req) => {
     const jwt = (req.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '');
     const { data: auth } = await db.auth.getUser(jwt);
     if (!auth?.user) return reply({ error: 'not_signed_in' }, 401);
+    if (action === 'invite') {
+      if (!(await isAdmin(auth.user))) return reply({ error: 'forbidden' }, 403);
+      return reply(await invite(String(body.clientId ?? '')));
+    }
     const row = await clients.byUserId(auth.user.id);
     if (!row) return reply({ error: 'no_client' }, 404);
     if (action === 'confirm') return reply({ opened: await confirmSignup(row, deps) });

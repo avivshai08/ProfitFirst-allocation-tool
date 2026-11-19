@@ -126,3 +126,36 @@ export function adminCancelledEmail(c: EmailClient, accessUntil: string | null, 
     ),
   };
 }
+
+/** The address a client signs in with: their login email, or else their contact email. */
+export function signInAddress(c: Pick<EmailClient, 'email' | 'login_email'>) {
+  return (c.login_email || c.email || '').trim();
+}
+
+/**
+ * To a client the admin added, sent from admin with "שלח מייל הצטרפות": how to get in with
+ * Google. A client who already used the tool (returning) is told that sign-in moved to Google.
+ */
+export function inviteEmail(c: EmailClient, accessUntil: string | null, returning: boolean): Email {
+  const address = signInAddress(c);
+  const li = (html: string) => `<li style="margin-bottom:6px;">${html}</li>`;
+  return {
+    to: address,
+    subject: returning ? 'הכניסה לכלי לחלוקת הכנסות עוברת ל־Google' : 'הוזמנת לכלי לחלוקת הכנסות של Bottom Line',
+    html: layout(
+      p(`שלום ${esc(c.name)},`)
+      + (returning
+        ? p('הכניסה לכלי לחלוקת הכנסות של Bottom Line היא מעכשיו עם חשבון Google, במקום שם וסיסמה. כל הנתונים וההקצאות שלך נשמרו.')
+        : p('נפתחה עבורך גישה לכלי לחלוקת הכנסות של Bottom Line.'))
+      + p('<strong>איך נכנסים:</strong>')
+      + `<ol style="${P}padding-right:20px;">`
+      + li(`נכנסים ל־<a href="${TOOL_URL}" style="color:#3A9E97;">app.profitfirst.finance</a>`)
+      + li('לוחצים על <strong>כניסה עם Google</strong>')
+      + li(`בוחרים את חשבון ה־Google ${ltr(address)}`)
+      + '</ol>'
+      + (accessUntil ? p(`הגישה פתוחה עד <strong>${heDate(accessUntil)}</strong>.`) : '')
+      + p('אם אין לך חשבון Google בכתובת הזו, אפשר להשיב למייל הזה עם הכתובת שבה נוח לך להיכנס, ונעדכן אותה.')
+      + button,
+    ),
+  };
+}
