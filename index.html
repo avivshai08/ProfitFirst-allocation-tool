@@ -148,22 +148,46 @@ function saveFailed(e){
 }
 async function sbRpc(fn,args){const r=await fetch(SB_URL+'/rest/v1/rpc/'+fn,{method:'POST',headers:{...await sbHeaders(),'Content-Type':'application/json'},body:JSON.stringify(args||{})});if(!r.ok)throw new Error(await r.text());return r.json();}
 
-// Online signup: SUMIT payment page (monthly standing order, first 30 days free) and the
-// server function that confirms payments and cancels (supabase/functions/pf-billing).
-const PAYMENT_URL='https://pay.sumit.co.il/8r3u23/x4oqsu/x4oqyg/payment/';
+// Two SUMIT payment pages for the same catalog item (a monthly standing order): the first
+// gives the first 30 days free, once per person (the database decides who, in
+// pf_start_signup); the second charges at once: renewing, fixing a failed payment, or a
+// person who already had the free month. The server function confirms payments and cancels
+// (supabase/functions/pf-billing).
+// "מערכת ניהול חלוקות (לקוח חדש)": first charge after 30 days.
+const PAYMENT_URL='https://pay.sumit.co.il/8r3u23/17ia2el/x4oqyg/payment/';
+// "מערכת ניהול חלוקות": first charge at once.
+const RENEW_PAYMENT_URL='https://pay.sumit.co.il/8r3u23/x4oqsu/x4oqyg/payment/';
 // Deployed from the dashboard as "pf-billing"; Supabase gave it the address quick-task.
 const BILLING_FN=SB_URL+'/functions/v1/quick-task';
 const PRICE_TEXT='25 ₪ + מע״מ לחודש · 30 הימים הראשונים ללא תשלום';
+const PRICE_NOW_TEXT='25 ₪ + מע״מ לחודש · החיוב הראשון מתבצע מיד';
+// After access ends the profile and its data are kept this many days (renewal), then deleted.
+const KEEP_DAYS=60;
 async function billing(action,extra){const r=await fetch(BILLING_FN,{method:'POST',headers:{...await sbHeaders(),'Content-Type':'application/json'},body:JSON.stringify({action,...(extra||{})})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j;}
 // Prefilled with the verified Google email and phone, by which the billing function finds the
 // payment in SUMIT (read-only lookups; nothing in the return address is trusted). The tag is
 // informational only: SUMIT does not keep it on the customer card.
-function paymentUrl(clientId,name,phone){
-  const u=new URL(PAYMENT_URL);
+function paymentUrl(clientId,name,phone,immediate){
+  const u=new URL(immediate?RENEW_PAYMENT_URL:PAYMENT_URL);
   u.searchParams.set('name',name);u.searchParams.set('emailaddress',state.authEmail||'');u.searchParams.set('phone',phone||'');
   u.searchParams.set('externalidentifier','pf-'+clientId);u.searchParams.set('customerexternalidentifier','pf-'+clientId);
   return u.toString();
 }
+// To a payment page. immediate: the page that charges at once (no free month).
+function goPay(clientId,name,phone,immediate){
+  if(immediate&&!RENEW_PAYMENT_URL){alert('התשלום אינו זמין כרגע. כתוב לנו: aviv@bottomline.finance');return;}
+  location.href=paymentUrl(clientId,name,phone,immediate);
+}
+
+// Dates as YYYY-MM-DD (end dates are stored as the day's last second).
+function dateOnly(v){return v?String(v).slice(0,10):null;}
+function todayIso(){const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+function addDaysIso(iso,n){const d=new Date(iso+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);}
+function heDate(iso){const x=String(iso).slice(0,10).split('-');return x[2]+'.'+x[1]+'.'+x[0];}
+// Same rule as the database: switched on, not awaiting payment, end date not passed.
+function hasAccessP(p){const end=dateOnly(p.subscriptionEnd);return p.active!==false&&!p.awaitingPayment&&(!end||end>=todayIso());}
+// In the grace period after a failed charge: an end date the billing check set, not cancelled.
+function inGrace(p){const end=dateOnly(p.subscriptionEnd);return !!end&&end===dateOnly(p.sumitEndDate)&&!p.cancelledAt&&end>=todayIso();}
 
 async function sendConfirmation(clientId,entry){
   const p=state.profiles[clientId];
@@ -188,7 +212,8 @@ function rowToProfile(r){
     subscriptionEnd:r.subscription_end||null,active:r.active!==false,createdAt:r.created_at||'',
     loginEmail:r.login_email||'',linked:!!r.user_id,dbId:r.id,log:[],
     awaitingPayment:r.awaiting_payment===true,signupSource:r.signup_source||'',phone:r.phone||'',
-    sumitCustomerId:r.sumit_customer_id||'',cancelledAt:r.subscription_cancelled_at||null};
+    sumitCustomerId:r.sumit_customer_id||'',cancelledAt:r.subscription_cancelled_at||null,
+    sumitEndDate:r.sumit_end_date||null,trialOffered:r.trial_offered!==false};
 }
 // Loading errors are thrown, so an empty list or log is never shown in place of one that failed to load.
 async function dbLoadClients(){
@@ -388,8 +413,12 @@ async function enterSignedIn(session){
       try{if((await billing('confirm')).opened)p=await dbLoadClient(curId);}catch(e){console.warn('confirm:',e);}
       if(p.awaitingPayment){renderAwaiting();return;}
     }
-    const expired=p.subscriptionEnd&&new Date(p.subscriptionEnd)<new Date();
-    if(p.active===false||expired){renderLand('תקופת המנוי הסתיימה. לחידוש המנוי צור קשר עם Bottom Line.');return;}
+    // No access, or an end date: ask SUMIT now, so a payment just made (renewal, a new card)
+    // opens access at once instead of at the next daily check.
+    if(!hasAccessP(p)||p.subscriptionEnd){
+      try{await billing('confirm');p=await dbLoadClient(curId);}catch(e){console.warn('check:',e);}
+    }
+    if(!hasAccessP(p)){renderEnded();return;}
     await dbLoadLog(curId);
     showDisclaimer(buildApp);
   }catch(e){
@@ -431,8 +460,12 @@ function renderSignup(session){
     this.disabled=true;this.textContent='רגע...';
     try{
       const res=await sbRpc('pf_start_signup',{p_name:name,p_phone:phone});
-      if(res.status==='created'){location.href=paymentUrl(res.id,name,phone);return;}
+      if(res.status==='created'){
+        if(res.trial===false&&!confirm('תקופת 30 הימים ללא תשלום כבר נוצלה עבור האימייל או הטלפון האלה, ולכן החיוב הראשון יתבצע מיד ('+PRICE_NOW_TEXT+').\nלהמשיך לתשלום?')){this.disabled=false;this.textContent='המשך לתשלום';return;}
+        goPay(res.id,name,phone,res.trial===false);return;
+      }
       if(res.status==='exists'){await enterSignedIn(session);return;}
+      if(res.status==='phone_taken'){this.disabled=false;this.textContent='המשך לתשלום';return fail('מספר הטלפון הזה כבר רשום אצלנו בחשבון אחר. היכנס/י עם חשבון ה־Google שבו נרשמת, או כתוב/י לנו: aviv@bottomline.finance');}
       fail(res.error==='phone'?'נא למלא מספר טלפון תקין':'נא לבדוק את הפרטים');
     }catch(e){console.warn('signup:',e);fail('ההרשמה נכשלה. נסה שוב.');}
     this.disabled=false;this.textContent='המשך לתשלום';
@@ -445,15 +478,44 @@ function renderAwaiting(){
   document.getElementById('s-land').innerHTML=
     '<div class="card">'
     +'<div class="lbl">ההרשמה כמעט הושלמה</div>'
-    +'<div style="font-size:13px;color:#555;line-height:1.7;margin-bottom:12px;">עדיין לא התקבל אישור על הרשמה למנוי ('+PRICE_TEXT+').<br>אם כבר השלמת את התשלום, האישור יכול להתקבל תוך כמה דקות.</div>'
+    +'<div style="font-size:13px;color:#555;line-height:1.7;margin-bottom:12px;">עדיין לא התקבל אישור על הרשמה למנוי ('+(p.trialOffered?PRICE_TEXT:PRICE_NOW_TEXT)+').<br>אם כבר השלמת את התשלום, האישור יכול להתקבל תוך כמה דקות.</div>'
     +'<button class="action-btn" id="aw-pay">המשך לתשלום</button>'
     +'<div style="text-align:center;margin-top:8px;">'
     +'<button style="font-size:12px;color:var(--td);background:none;border:none;cursor:pointer;font-weight:500;" id="aw-check">כבר שילמתי — בדוק שוב</button>'
     +' · <button style="font-size:12px;color:#888;background:none;border:none;cursor:pointer;" onclick="signOut()">התנתק</button></div>'
     +'</div>';
   show('land');
-  document.getElementById('aw-pay').addEventListener('click',()=>{location.href=paymentUrl(curId,p.name,p.phone);});
-  document.getElementById('aw-check').addEventListener('click',async()=>{const{data}=await sb.auth.getSession();if(data.session)enterSignedIn(data.session);else renderLand();});
+  document.getElementById('aw-pay').addEventListener('click',()=>goPay(curId,p.name,p.phone,!p.trialOffered));
+  document.getElementById('aw-check').addEventListener('click',recheck);
+}
+
+// Signs in again (asking SUMIT on the way): after paying, or "כבר שילמתי — בדוק שוב".
+async function recheck(){const{data}=await sb.auth.getSession();if(data.session)enterSignedIn(data.session);else renderLand();}
+
+// Access ended. Within KEEP_DAYS of the end the client can renew on the immediate-charge page
+// and continue with all their data; after that the daily job deletes the profile.
+function renderEnded(){
+  const p=gP();
+  const end=dateOnly(p.subscriptionEnd);
+  const until=end?addDaysIso(end,KEEP_DAYS):null;
+  const canRenew=!!until&&todayIso()<=until;
+  const link='font-size:12px;background:none;border:none;cursor:pointer;';
+  document.getElementById('s-land').innerHTML=
+    '<div class="card">'
+    +'<div class="lbl">המנוי הסתיים</div>'
+    +(canRenew
+      ?'<div style="font-size:13px;color:#555;line-height:1.7;margin-bottom:12px;">הגישה לכלי הסתיימה ב־<strong>'+heDate(end)+'</strong>.<br>'
+        +'אפשר לחדש את המנוי עד <strong>'+heDate(until)+'</strong> ולהמשיך עם כל הנתונים שלך. לאחר תאריך זה החשבון והנתונים יימחקו.</div>'
+        +'<div style="font-size:12px;color:#888;margin-bottom:4px;">'+PRICE_NOW_TEXT+'</div>'
+        +'<button class="action-btn" id="en-renew">חידוש מנוי</button>'
+        +'<div style="text-align:center;margin-top:8px;"><button style="'+link+'color:var(--td);font-weight:500;" id="en-check">כבר שילמתי — בדוק שוב</button>'
+      :'<div style="font-size:13px;color:#555;line-height:1.7;margin-bottom:12px;">תקופת המנוי הסתיימה. לחידוש המנוי צור קשר עם Bottom Line: <a href="mailto:aviv@bottomline.finance" style="color:var(--td);">aviv@bottomline.finance</a></div>'
+        +'<div style="text-align:center;margin-top:8px;">')
+    +(canRenew?' · ':'')+'<button style="'+link+'color:#888;" onclick="signOut()">התנתק</button></div>'
+    +'</div>';
+  show('land');
+  const r=document.getElementById('en-renew');if(r)r.addEventListener('click',()=>goPay(curId,p.name,p.phone,true));
+  const c=document.getElementById('en-check');if(c)c.addEventListener('click',recheck);
 }
 
 function renderAdmin(){
@@ -473,8 +535,8 @@ function renderAdminTab(tab){
       const p=state.profiles[id];
       const expired=p.subscriptionEnd&&new Date(p.subscriptionEnd)<now;
       const isActive=p.active!==false&&!expired;
-      const statusColor=p.awaitingPayment?'#E8A020':isActive?'#1D9E75':'#E24B4A';
-      const statusLabel=p.awaitingPayment?'ממתין לתשלום':isActive?'פעיל':'לא פעיל';
+      const statusColor=p.awaitingPayment||inGrace(p)?'#E8A020':isActive?'#1D9E75':'#E24B4A';
+      const statusLabel=p.awaitingPayment?'ממתין לתשלום':inGrace(p)?'חיוב נכשל':isActive?'פעיל':'לא פעיל';
       clientRows+=
         '<div style="display:flex;align-items:center;gap:10px;padding:12px;background:var(--color-background-primary);border:1px solid var(--color-border-tertiary);border-radius:12px;margin-bottom:8px;cursor:pointer;" class="adm-open-client" data-id="'+id+'">'
         +'<div class="av" style="background:'+avB[i%6]+';color:'+avF[i%6]+';flex-shrink:0;">'+esc(ini(p.name))+'</div>'
@@ -526,16 +588,47 @@ function renderAdminTab(tab){
   }
 }
 
-// "סיים מנוי" (list and client card). A client paying by SUMIT standing order is ended by the
-// billing function, which first cancels the order in SUMIT so no further charges are made;
-// a client managed by hand only gets today's end date. Returns true when ended.
+// The admin's choice when ending a client who has a SUMIT standing order: also cancel the
+// order, or keep it. Resolves 'cancel', 'keep', or null (back, nothing changes).
+function askEndChoice(name){
+  return new Promise(resolve=>{
+    const ov=document.createElement('div');
+    ov.setAttribute('style','position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;');
+    ov.innerHTML='<div style="background:#fff;border-radius:12px;padding:20px;max-width:420px;width:100%;direction:rtl;" role="dialog" aria-modal="true">'
+      +'<div style="font-size:15px;font-weight:600;margin-bottom:8px;">סיום המנוי של '+esc(name)+'</div>'
+      +'<div style="font-size:13px;color:#555;line-height:1.7;margin-bottom:14px;">הגישה לכלי תיחסם מיד. ללקוח יש הוראת קבע ב־SUMIT: מה לעשות בה?</div>'
+      +'<button class="action-btn" style="margin-top:0;background:var(--danger);color:#fff;" data-c="cancel">סיים מנוי ובטל את הוראת הקבע</button>'
+      +'<div style="font-size:11px;color:#888;margin:4px 0 10px;">לא יבוצעו חיובים נוספים.</div>'
+      +'<button class="action-btn" style="margin-top:0;" data-c="keep">סיים מנוי בלבד, הוראת הקבע נשארת</button>'
+      +'<div style="font-size:11px;color:#888;margin:4px 0 10px;">החיובים ימשיכו. אם יתבצע חיוב חדש, הגישה תיפתח מחדש.</div>'
+      +'<button class="btn-out" style="width:100%;" data-c="">חזרה</button>'
+      +'</div>';
+    ov.addEventListener('click',e=>{
+      const b=e.target.closest('[data-c]');
+      if(!b&&e.target!==ov)return;
+      document.body.removeChild(ov);
+      resolve(b&&b.dataset.c?b.dataset.c:null);
+    });
+    document.body.appendChild(ov);
+  });
+}
+
+// "סיים מנוי" (list and client card). For a client with a SUMIT standing order the admin
+// chooses whether to cancel it too; the billing function cancels it (first, so a SUMIT
+// failure changes nothing) only if chosen. A client managed by hand only gets today's end
+// date. Returns true when ended.
 async function adminEndSubscription(id){
   const p=state.profiles[id];if(!p)return false;
   const billed=!!p.sumitCustomerId;
-  if(!confirm('לסיים את המנוי של '+p.name+' עכשיו?\n'+(billed?'הוראת הקבע ב־SUMIT תבוטל (לא יבוצעו חיובים נוספים) והגישה לכלי תיחסם מיד.':'הגישה לכלי תיחסם מיד.')))return false;
+  let cancelOrder=false;
+  if(billed){
+    const choice=await askEndChoice(p.name);
+    if(!choice)return false;
+    cancelOrder=choice==='cancel';
+  }else if(!confirm('לסיים את המנוי של '+p.name+' עכשיו?\nהגישה לכלי תיחסם מיד.'))return false;
   try{
     if(billed){
-      const res=await billing('admin_end',{clientId:id});
+      const res=await billing('admin_end',{clientId:id,cancelOrder});
       if(!res.ok)throw new Error(res.error||'failed');
       p.subscriptionEnd=res.endedAt;p.active=false;p.cancelledAt=res.cancelledAt||p.cancelledAt;
     }else{
@@ -546,7 +639,7 @@ async function adminEndSubscription(id){
     return true;
   }catch(e){
     console.warn('end subscription:',e);
-    alert(billed
+    alert(cancelOrder
       ?'סיום המנוי נכשל, ולא שונה דבר. ייתכן שהוראת הקבע ב־SUMIT עדיין פעילה. נסה שוב, או בטל אותה ישירות ב־SUMIT.'
       :'סיום המנוי נכשל, ולא שונה דבר. נסה שוב.');
     return false;
@@ -558,7 +651,7 @@ async function adminEndSubscription(id){
 async function adminDeleteClient(id){
   const p=state.profiles[id];if(!p)return false;
   if(p.sumitCustomerId&&!p.cancelledAt){
-    alert('ל'+p.name+' יש הוראת קבע ב־SUMIT. לחץ קודם "סיים מנוי" (זה מבטל את הוראת הקבע), ורק אז מחק.');
+    alert('ל'+p.name+' יש הוראת קבע ב־SUMIT. לחץ קודם "סיים מנוי" ובחר "סיים מנוי ובטל את הוראת הקבע", ורק אז מחק.');
     return false;
   }
   if(!confirm('למחוק את '+p.name+' וכל הנתונים?'+(p.awaitingPayment?'\nשים לב: הלקוח ממתין לאישור תשלום. אם שילם, הוראת הקבע תצטרך ביטול ידני ב־SUMIT.':'')))return false;
@@ -662,6 +755,7 @@ function renderClientAdminTab(tab){
       +'<input type="email" id="ca-login-email" dir="ltr" value="'+esc(p.loginEmail)+'" placeholder="'+esc(p.email)+'"></div>'
       +'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">'
       +'<button class="btn-sm" id="ca-invite-btn">שלח מייל הצטרפות</button>'
+      +'<button class="btn-sm" id="ca-check-btn">בדוק מול SUMIT</button>'
       +(p.linked?'<button class="btn-sm" id="ca-unlink-btn">נתק חשבון Google</button>':'')
       +'</div>'
       +'<div id="ca-invite-msg" style="display:none;margin-bottom:10px;"></div>'
@@ -761,6 +855,22 @@ function renderClientAdminTab(tab){
       this.disabled=false;this.textContent='שלח מייל הצטרפות';
     });
 
+    // "בדוק מול SUMIT": brings this client up to date with SUMIT now (a payment, a new card,
+    // a failed charge), instead of waiting for the daily check.
+    document.getElementById('ca-check-btn').addEventListener('click',async function(){
+      const out=document.getElementById('ca-invite-msg');
+      const say=(t,ok)=>{out.style.display='block';out.className=ok?'suc':'err';out.textContent=t;};
+      this.disabled=true;this.textContent='בודק...';
+      try{
+        const res=await billing('admin_check',{clientId:id});
+        const rows=await sbGet('clients','?id=eq.'+id+'&select=*');
+        if(rows&&rows[0]){const keepLog=state.profiles[id].log;state.profiles[id]=rowToProfile(rows[0]);state.profiles[id].log=keepLog;}
+        renderClientAdminTab('info');
+        const o2=document.getElementById('ca-invite-msg');
+        if(o2){o2.style.display='block';o2.className='suc';o2.textContent='✓ נבדק מול SUMIT: '+(res.access?'יש גישה לכלי.':'אין גישה לכלי.');}
+      }catch(e){console.warn('check:',e);say('הבדיקה מול SUMIT נכשלה. נסה שוב.',false);this.disabled=false;this.textContent='בדוק מול SUMIT';}
+    });
+
     const unlinkBtn=document.getElementById('ca-unlink-btn');
     if(unlinkBtn)unlinkBtn.addEventListener('click',function(){
       if(!confirm('לנתק את חשבון ה־Google של '+p.name+'? בכניסה הבאה הלקוח יחובר מחדש לפי האימייל לכניסה. הנתונים לא נמחקים.'))return;
@@ -848,6 +958,13 @@ function buildApp(){
     '<div class="topbar"><button class="btn-out" onclick="signOut()">← יציאה</button>'
     +'<span class="tbtitle" style="margin-right:8px;">'+esc(p.name)+'</span>'
     +'<span class="badge badge-c">לקוח</span></div>'
+    +(inGrace(p)
+      ?'<div class="card" style="background:var(--danger-bg);border-color:var(--danger);" id="grace-banner">'
+        +'<div style="font-size:13px;color:#333;line-height:1.7;margin-bottom:10px;"><strong>החיוב החודשי האחרון לא עבר.</strong> הגישה לכלי תיחסם אחרי <strong>'+heDate(p.subscriptionEnd)+'</strong>.<br>'
+        +'אפשר לעדכן אמצעי תשלום עכשיו: נפתחת הוראת קבע חדשה ('+PRICE_NOW_TEXT+'), והקודמת מבוטלת.</div>'
+        +'<button class="btn-sm" id="grace-pay">עדכון אמצעי תשלום</button>'
+        +' <button style="font-size:12px;color:var(--td);background:none;border:none;cursor:pointer;font-weight:500;" id="grace-check">כבר עדכנתי — בדוק שוב</button></div>'
+      :'')
     +'<div class="tab-bar">'
     +'<button class="tab "+(activeTab==="alloc"?"on":"")+" " id="tab-alloc" onclick="setTab(\'alloc\')">מחשבון חלוקה</button>'
     +'<button class="tab" id="tab-log" onclick="setTab(\'log\')">יומן ('+(p.log||[]).length+')</button>'
@@ -855,6 +972,8 @@ function buildApp(){
     +'<button class="tab '+(activeTab==="profile"?"on":"")+'" id="tab-profile" onclick="setTab(\'profile\')">הגדרות פרופיל</button>'
     +'</div><div id="tc"></div>';
   show('app');renderTab();
+  const gp=document.getElementById('grace-pay');if(gp)gp.addEventListener('click',()=>goPay(curId,p.name,p.phone,true));
+  const gc=document.getElementById('grace-check');if(gc)gc.addEventListener('click',recheck);
 }
 function setTab(t){
   flushAccounts();
@@ -956,7 +1075,8 @@ function buildSubscriptionCard(container){
   card.className='card';
   card.innerHTML='<div class="lbl">מנוי</div>'
     +(p.cancelledAt
-      ?'<div style="font-size:13px;color:#555;line-height:1.7;">המנוי בוטל'+(endFmt?'. הגישה לכלי תימשך עד <strong>'+endFmt+'</strong>.':'.')+'</div>'
+      ?'<div style="font-size:13px;color:#555;line-height:1.7;">המנוי בוטל'+(endFmt?'. הגישה לכלי תימשך עד <strong>'+endFmt+'</strong>.':'.')
+        +(p.subscriptionEnd?'<br>אפשר לחדש עד <strong>'+heDate(addDaysIso(dateOnly(p.subscriptionEnd),KEEP_DAYS))+'</strong> ולהמשיך עם כל הנתונים. לאחר מכן החשבון והנתונים יימחקו.':'')+'</div>'
       :'<div style="font-size:13px;color:#555;line-height:1.7;margin-bottom:12px;">מנוי חודשי: 25 ₪ + מע״מ. מתחדש אוטומטית.</div>'
         +'<div id="sub-err" class="err" style="display:none;"></div>'
         +'<button class="btn-red" id="sub-cancel">ביטול מנוי</button>');
@@ -964,7 +1084,7 @@ function buildSubscriptionCard(container){
   const btn=document.getElementById('sub-cancel');
   if(!btn)return;
   btn.addEventListener('click',async function(){
-    if(!confirm('לבטל את המנוי? לא יבוצעו חיובים נוספים, והגישה לכלי תימשך עד סוף התקופה ששולמה.'))return;
+    if(!confirm('לבטל את המנוי? לא יבוצעו חיובים נוספים, והגישה לכלי תימשך עד סוף התקופה ששולמה.\nאחרי סיום הגישה אפשר לחדש תוך '+KEEP_DAYS+' יום ולהמשיך עם כל הנתונים; לאחר מכן הם יימחקו.'))return;
     btn.disabled=true;btn.textContent='מבטל...';
     const err=document.getElementById('sub-err');
     try{

@@ -1,31 +1,42 @@
 // Supabase Edge Function "pf-billing": the allocation tool's SUMIT billing.
-//   {action:"confirm"} — signed-in client: open access once SUMIT shows their order (after payment)
+//   {action:"confirm"} — signed-in client, on opening the tool and "כבר שילמתי — בדוק שוב": checks
+//                        SUMIT now (logic.ts checkClient), so a signup or renewal opens at once
 //   {action:"cancel"}  — signed-in client: cancel their standing order (ביטול מנוי)
-//   {action:"daily"}   — scheduled job (header x-cron-secret): see logic.ts runDaily
+//   {action:"daily"}   — scheduled job (header x-cron-secret): logic.ts runDaily, then runRetention
 //   {action:"invite", clientId} — admin only: "שלח מייל הצטרפות" to a client (how to sign in)
-//   {action:"admin_end", clientId} — admin only: "סיים מנוי": cancel the SUMIT order, end access now
+//   {action:"admin_check", clientId} — admin only: "בדוק מול SUMIT" for a client
+//   {action:"admin_end", clientId, cancelOrder} — admin only: "סיים מנוי": end access now; cancel
+//                        the SUMIT standing order only when cancelOrder is true (the admin chose it)
 // Secrets (Supabase → Edge Functions → Secrets): SUMIT_COMPANY_ID, SUMIT_API_KEY,
-// PF_SUMIT_ITEM_ID (this tool's catalog item in SUMIT), PF_CRON_SECRET, RESEND_API_KEY (the
-// signup and cancellation emails, see emails.ts; without it billing still works, unannounced).
+// PF_SUMIT_ITEM_ID (this tool's catalog item in SUMIT; several separated by commas when the
+// signup and renewal pages use different items), PF_CRON_SECRET, RESEND_API_KEY (the emails,
+// see emails.ts; without it billing still works, unannounced), PF_DELETE_EXPIRED ("on" turns
+// on deleting clients KEEP_DAYS after their access ended; otherwise the daily run only logs
+// who is due).
 // SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are provided by Supabase.
 import { createClient } from 'npm:@supabase/supabase-js@2.119.0';
 import {
   cancelSubscription,
   type ClientRow,
   type Clients,
-  confirmSignup,
+  checkClient,
   endNow,
+  hasAccess,
   type Notify,
   type RecurringItem,
   runDaily,
+  runRetention,
   STATUS,
   type Sumit,
   type SumitCustomer,
 } from './logic.ts';
 import {
   adminCancelledEmail,
+  adminDuplicateOrdersEmail,
+  adminHeldEmail,
   adminSignupEmail,
   cancelledEmail,
+  endedEmail,
   type Email,
   FROM,
   inviteEmail,
@@ -120,10 +131,13 @@ async function sendAll(emails: Email[]) {
 const notify: Notify = {
   signedUp: (row, firstCharge) => sendAll([welcomeEmail(row, firstCharge), adminSignupEmail(row, firstCharge)]),
   cancelled: (row, accessUntil, by) => sendAll([cancelledEmail(row, accessUntil), adminCancelledEmail(row, accessUntil, by)]),
+  ended: (row, endDate) => send(endedEmail(row, endDate)),
+  held: (row, endDate) => send(adminHeldEmail(row, endDate)),
+  duplicateOrders: (row, customerId, orderIds) => send(adminDuplicateOrdersEmail(row, customerId, orderIds)),
 };
 
 const db = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), { auth: { persistSession: false } });
-const COLUMNS = 'id,name,email,login_email,phone,signup_source,sumit_customer_id,awaiting_payment,subscription_end,sumit_end_date,subscription_cancelled_at,created_at';
+const COLUMNS = 'id,name,email,login_email,phone,signup_source,sumit_customer_id,awaiting_payment,subscription_end,sumit_end_date,subscription_cancelled_at,created_at,active,user_id,sumit_last_charge,access_end_notice,deletion_held_at,orders_notice';
 async function rows(query: PromiseLike<{ data: unknown; error: unknown }>): Promise<ClientRow[]> {
   const { data, error } = await query;
   if (error) throw new Error(JSON.stringify(error));
@@ -141,6 +155,26 @@ const clients: Clients = {
   },
   billed() {
     return rows(db.from('clients').select(COLUMNS).eq('awaiting_payment', false).not('sumit_customer_id', 'is', null));
+  },
+  async dueForDeletion(cutoffDate) {
+    const ended = await rows(db.from('clients').select(COLUMNS).lt('subscription_end', cutoffDate));
+    const unpaid = await rows(db.from('clients').select(COLUMNS).eq('awaiting_payment', true).lt('created_at', cutoffDate));
+    const seen = new Set(ended.map((r) => r.id));
+    return [...ended, ...unpaid.filter((r) => !seen.has(r.id))];
+  },
+  async remove(row) {
+    const allocs = await db.from('allocations').delete().eq('client_id', row.id);
+    if (allocs.error) throw new Error(JSON.stringify(allocs.error));
+    const client = await db.from('clients').delete().eq('id', row.id);
+    if (client.error) throw new Error(JSON.stringify(client.error));
+    // The Google sign-in record too, unless it is an admin's (never lock the admin out).
+    if (row.user_id) {
+      const { data } = await db.auth.admin.getUserById(row.user_id);
+      if (data?.user && !(await isAdmin(data.user))) {
+        const gone = await db.auth.admin.deleteUser(row.user_id);
+        if (gone.error) console.error(`delete sign-in ${row.id}: ${JSON.stringify(gone.error)}`);
+      }
+    }
   },
   async update(id, values) {
     const { error } = await db.from('clients').update(values).eq('id', id);
@@ -183,17 +217,21 @@ async function invite(clientId: string) {
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
-  const productItemId = Number(env('PF_SUMIT_ITEM_ID'));
-  if (!env('SUMIT_COMPANY_ID') || !env('SUMIT_API_KEY') || !productItemId) return reply({ error: 'not_configured' }, 503);
+  const productItemId = env('PF_SUMIT_ITEM_ID').split(',').map((id) => Number(id.trim())).filter((id) => id > 0);
+  if (!env('SUMIT_COMPANY_ID') || !env('SUMIT_API_KEY') || !productItemId.length) return reply({ error: 'not_configured' }, 503);
   const deps = { clients, sumit, productItemId, notify };
-  let body: { action?: string; clientId?: string } = {};
+  let body: { action?: string; clientId?: string; cancelOrder?: boolean } = {};
   try { body = await req.json(); } catch { /* empty body */ }
   const action = String(body.action ?? '');
 
   try {
     if (action === 'daily') {
       if (!env('PF_CRON_SECRET') || req.headers.get('x-cron-secret') !== env('PF_CRON_SECRET')) return reply({ error: 'forbidden' }, 403);
-      return reply(await runDaily(today(), deps));
+      const daily = await runDaily(today(), deps);
+      const retention = await runRetention(today(), deps, env('PF_DELETE_EXPIRED') === 'on');
+      // Names only, to check from the Logs tab (who is due while deleting is off).
+      console.log(`retention: deleted [${retention.deleted.join(', ')}] held [${retention.held.join(', ')}] due [${retention.due.join(', ')}] failed ${retention.failed}`);
+      return reply({ ...daily, retention: { deleted: retention.deleted.length, held: retention.held.length, due: retention.due.length, failed: retention.failed } });
     }
     const jwt = (req.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '');
     const { data: auth } = await db.auth.getUser(jwt);
@@ -206,11 +244,23 @@ Deno.serve(async (req) => {
       if (!(await isAdmin(auth.user))) return reply({ error: 'forbidden' }, 403);
       const target = await clients.byId(String(body.clientId ?? ''));
       if (!target) return reply({ error: 'no_client' }, 404);
-      return reply(await endNow(target, new Date().toISOString(), deps));
+      return reply(await endNow(target, new Date().toISOString(), deps, body.cancelOrder === true));
+    }
+    if (action === 'admin_check') {
+      if (!(await isAdmin(auth.user))) return reply({ error: 'forbidden' }, 403);
+      const target = await clients.byId(String(body.clientId ?? ''));
+      if (!target) return reply({ error: 'no_client' }, 404);
+      await checkClient(target, today(), deps);
+      const fresh = await clients.byId(target.id);
+      return reply({ ok: true, access: fresh ? hasAccess(fresh, today()) : false });
     }
     const row = await clients.byUserId(auth.user.id);
     if (!row) return reply({ error: 'no_client' }, 404);
-    if (action === 'confirm') return reply({ opened: await confirmSignup(row, deps) });
+    if (action === 'confirm') {
+      await checkClient(row, today(), deps);
+      const fresh = await clients.byId(row.id);
+      return reply({ opened: fresh ? hasAccess(fresh, today()) : false });
+    }
     if (action === 'cancel') return reply(await cancelSubscription(row, today(), deps));
     return reply({ error: 'unknown_action' }, 400);
   } catch (e) {

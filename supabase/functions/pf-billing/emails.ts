@@ -1,6 +1,9 @@
-// The billing emails: to the client when their signup is confirmed and when their
-// subscription is cancelled, and to the admin about both. Same look as bright-function's
-// emails. Pure functions (subject + HTML), so they can be tested without sending.
+// The billing emails: to the client when their signup is confirmed, when their
+// subscription is cancelled or their access ends (with the renewal deadline), and to the
+// admin. Same look as bright-function's emails. Pure functions (subject + HTML), so they
+// can be tested without sending.
+
+import { KEEP_DAYS } from './logic.ts';
 
 export const FROM = 'Bottom Line <aviv@bottomline.finance>';
 /** Where the admin's notifications go (not the admin's Google sign-in address). */
@@ -77,6 +80,18 @@ export function welcomeEmail(c: EmailClient, firstCharge: string | null): Email 
   };
 }
 
+const renewBy = (endDate: string) => {
+  const d = new Date(`${endDate.slice(0, 10)}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + KEEP_DAYS);
+  return d.toISOString().slice(0, 10);
+};
+/** "Renew by <date>, after that the data is deleted", for the cancellation and access-ended emails. */
+function renewalNote(endDate: string | null) {
+  return endDate
+    ? p(`אפשר לחדש את המנוי עד <strong>${heDate(renewBy(endDate))}</strong>, ולהמשיך עם כל הנתונים שלך: נכנסים לכלי ובוחרים "חידוש מנוי". לאחר תאריך זה החשבון והנתונים יימחקו.`)
+    : p(`אפשר לחדש את המנוי עד ${KEEP_DAYS} יום לאחר סיום הגישה, ולהמשיך עם כל הנתונים שלך: נכנסים לכלי ובוחרים "חידוש מנוי". לאחר מכן החשבון והנתונים יימחקו.`);
+}
+
 /** To the client, once their subscription is cancelled. */
 export function cancelledEmail(c: EmailClient, accessUntil: string | null): Email {
   return {
@@ -86,7 +101,41 @@ export function cancelledEmail(c: EmailClient, accessUntil: string | null): Emai
       p(`שלום ${esc(c.name)},`)
       + p('המנוי שלך לכלי לחלוקת הכנסות בוטל, ולא יבוצעו חיובים נוספים.')
       + (accessUntil ? p(`הגישה לכלי תימשך עד <strong>${heDate(accessUntil)}</strong>.`) : '')
+      + renewalNote(accessUntil)
       + p('אם לא ביקשת לבטל, או שיש לך שאלה, אפשר להשיב למייל הזה.'),
+    ),
+  };
+}
+
+/** To the client, when access ended without a cancellation (the payment did not go through). */
+export function endedEmail(c: EmailClient, endDate: string): Email {
+  return {
+    to: clientAddress(c),
+    subject: 'הגישה לכלי לחלוקת הכנסות הסתיימה',
+    html: layout(
+      p(`שלום ${esc(c.name)},`)
+      + p(`החיוב החודשי לא עבר, ולכן הגישה לכלי לחלוקת הכנסות הסתיימה ב־<strong>${heDate(endDate)}</strong>.`)
+      + renewalNote(endDate)
+      + p('בחידוש מזינים אמצעי תשלום, והגישה נפתחת מיד.')
+      + button,
+    ),
+  };
+}
+
+/** To the admin: due for deletion, but SUMIT still shows a live standing order, so not deleted. */
+export function adminHeldEmail(c: EmailClient, endDate: string): Email {
+  return {
+    to: ADMIN_EMAIL,
+    subject: `לא נמחק: ${c.name} (הוראת קבע פעילה ב־SUMIT)`,
+    html: layout(
+      p(`עברו ${KEEP_DAYS} יום מסיום הגישה של הלקוח, אבל ב־SUMIT עדיין יש לו הוראת קבע פעילה לכלי, ולכן הוא לא נמחק.`)
+      + p('אם הלקוח לא אמור להיות מחויב, בטל את הוראת הקבע ב־SUMIT, והלקוח יימחק בבדיקה היומית הבאה. אם הוא אמור לקבל גישה, פתח לו את המנוי בכרטיס הלקוח.')
+      + details([
+        ['שם', esc(c.name)],
+        ['אימייל', ltr(clientAddress(c))],
+        ['סיום גישה', heDate(endDate)],
+        ...(c.sumit_customer_id ? [['מספר לקוח SUMIT', ltr(c.sumit_customer_id)] as [string, string]] : []),
+      ]),
     ),
   };
 }
@@ -122,6 +171,24 @@ export function adminCancelledEmail(c: EmailClient, accessUntil: string | null, 
         ['אימייל', ltr(clientAddress(c))],
         ['גישה עד', accessUntil ? heDate(accessUntil) : 'ללא תאריך סיום'],
         ...(c.sumit_customer_id ? [['מספר לקוח SUMIT', ltr(c.sumit_customer_id)] as [string, string]] : []),
+      ]),
+    ),
+  };
+}
+
+/** To the admin: a client with open access has more than one live standing order for the tool. */
+export function adminDuplicateOrdersEmail(c: EmailClient, customerId: string, orderIds: number[]): Email {
+  return {
+    to: ADMIN_EMAIL,
+    subject: `שתי הוראות קבע פעילות: ${c.name}`,
+    html: layout(
+      p('ללקוח יש יותר מהוראת קבע פעילה אחת לכלי ב־SUMIT, ולכן הוא עלול להיות מחויב פעמיים. הכלי לא ביטל דבר.')
+      + p('בדוק ב־SUMIT ובטל את ההוראה המיותרת. ההודעה הזו נשלחת פעם אחת לכל מצב כזה.')
+      + details([
+        ['שם', esc(c.name)],
+        ['אימייל', ltr(clientAddress(c))],
+        ['מספר לקוח SUMIT', ltr(customerId)],
+        ['הוראות קבע', ltr(orderIds.join(', '))],
       ]),
     ),
   };
