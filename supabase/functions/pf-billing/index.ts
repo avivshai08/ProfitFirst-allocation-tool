@@ -5,8 +5,7 @@
 //   {action:"daily"}   — scheduled job (header x-cron-secret): logic.ts runDaily, then runRetention
 //   {action:"invite", clientId} — admin only: "שלח מייל הצטרפות" to a client (how to sign in)
 //   {action:"admin_check", clientId} — admin only: "בדוק מול SUMIT" for a client
-//   {action:"admin_end", clientId, cancelOrder} — admin only: "סיים מנוי": end access now; cancel
-//                        the SUMIT standing order only when cancelOrder is true (the admin chose it)
+//   {action:"admin_end", clientId} — admin only: "סיים מנוי": cancel the SUMIT standing order, end access now
 // Secrets (Supabase → Edge Functions → Secrets): SUMIT_COMPANY_ID, SUMIT_API_KEY,
 // PF_SUMIT_ITEM_ID (this tool's catalog item in SUMIT; several separated by commas when the
 // signup and renewal pages use different items), PF_CRON_SECRET, RESEND_API_KEY (the emails,
@@ -220,7 +219,7 @@ Deno.serve(async (req) => {
   const productItemId = env('PF_SUMIT_ITEM_ID').split(',').map((id) => Number(id.trim())).filter((id) => id > 0);
   if (!env('SUMIT_COMPANY_ID') || !env('SUMIT_API_KEY') || !productItemId.length) return reply({ error: 'not_configured' }, 503);
   const deps = { clients, sumit, productItemId, notify };
-  let body: { action?: string; clientId?: string; cancelOrder?: boolean } = {};
+  let body: { action?: string; clientId?: string } = {};
   try { body = await req.json(); } catch { /* empty body */ }
   const action = String(body.action ?? '');
 
@@ -244,7 +243,7 @@ Deno.serve(async (req) => {
       if (!(await isAdmin(auth.user))) return reply({ error: 'forbidden' }, 403);
       const target = await clients.byId(String(body.clientId ?? ''));
       if (!target) return reply({ error: 'no_client' }, 404);
-      return reply(await endNow(target, new Date().toISOString(), deps, body.cancelOrder === true));
+      return reply(await endNow(target, new Date().toISOString(), deps));
     }
     if (action === 'admin_check') {
       if (!(await isAdmin(auth.user))) return reply({ error: 'forbidden' }, 403);

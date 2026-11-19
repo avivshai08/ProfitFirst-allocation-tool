@@ -436,14 +436,14 @@ export async function cancelSubscription(row: ClientRow, today: string, deps: De
 export type EndResult = { ok: true; endedAt: string; cancelledInSumit: number; cancelledAt: string | null };
 
 /**
- * The admin's "סיים מנוי": ends access now. The standing order in SUMIT is cancelled only when
- * the admin chose that (cancelOrder), and then before anything else, so if SUMIT fails
- * nothing in the tool changes. The end date is the admin's (sumit_end_date cleared). If the
- * order is kept and SUMIT charges again, that new charge reopens access (checkBilled).
- * No email: the admin tells the client.
+ * The admin's "סיים מנוי": cancels this tool's live standing orders in SUMIT (for a client with
+ * a SUMIT customer number), then ends access now. SUMIT is cancelled first, so if SUMIT fails
+ * nothing in the tool changes and the admin can try again (orders already cancelled are
+ * skipped). The end date is the admin's (sumit_end_date cleared), so the daily check never
+ * changes it. No email: the admin tells the client.
  */
-export async function endNow(row: ClientRow, now: string, deps: Deps, cancelOrder: boolean): Promise<EndResult> {
-  const customer = cancelOrder ? sumitCustomerOf(row) : null;
+export async function endNow(row: ClientRow, now: string, deps: Deps): Promise<EndResult> {
+  const customer = sumitCustomerOf(row);
   let cancelledInSumit = 0;
   if (customer) {
     const live = ofThisProduct(await deps.sumit.list(customer, false), deps.productItemId).filter((item) => !ENDED.includes(item.status));
@@ -453,8 +453,11 @@ export async function endNow(row: ClientRow, now: string, deps: Deps, cancelOrde
     }
   }
   const cancelledAt = customer ? (row.subscription_cancelled_at ?? now) : row.subscription_cancelled_at;
-  await deps.clients.update(row.id, { active: false, subscription_end: now, sumit_end_date: null, subscription_cancelled_at: cancelledAt });
-  return { ok: true, endedAt: now, cancelledInSumit, cancelledAt };
+  // A client whose access already ended keeps that end date (the 60 days count from it);
+  // only the standing order is cancelled then.
+  const endedAt = hasAccess(row, now.slice(0, 10)) ? now : (row.subscription_end ?? now);
+  await deps.clients.update(row.id, { active: false, subscription_end: endedAt, sumit_end_date: null, subscription_cancelled_at: cancelledAt });
+  return { ok: true, endedAt, cancelledInSumit, cancelledAt };
 }
 
 export type DailyResult = { opened: number; changed: number; failed: number };

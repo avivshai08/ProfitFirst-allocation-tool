@@ -546,7 +546,9 @@ function renderAdminTab(tab){
         +'<span style="font-size:11px;color:#999;margin-right:6px;">'+(p.linked?'מחובר ל־Google':'טרם התחבר')+'</span>'
         +'</div>'
         // Action icons - stop propagation so clicking icon doesn't open client
-        +'<button class="adm-expire-quick" data-id="'+id+'" title="סיים מנוי" style="width:32px;height:32px;border:1px solid #E8A020;border-radius:6px;background:transparent;cursor:pointer;font-size:16px;color:#E8A020;flex-shrink:0;">⏸</button>'
+        +(canEnd(p)
+          ?'<button class="adm-expire-quick" data-id="'+id+'" title="סיים מנוי" style="width:32px;height:32px;border:1px solid #E8A020;border-radius:6px;background:transparent;cursor:pointer;font-size:16px;color:#E8A020;flex-shrink:0;">⏸</button>'
+          :'<button class="adm-expire-quick" data-id="'+id+'" disabled title="המנוי כבר הסתיים" style="width:32px;height:32px;border:1px solid #ddd;border-radius:6px;background:#f5f5f5;cursor:not-allowed;font-size:16px;color:#bbb;flex-shrink:0;">⏸</button>')
         +'<button class="adm-del-quick" data-id="'+id+'" title="מחק לקוח" style="width:32px;height:32px;border:1px solid #E24B4A;border-radius:6px;background:transparent;cursor:pointer;font-size:16px;color:#E24B4A;flex-shrink:0;">🗑</button>'
         +'</div>';
     });
@@ -588,47 +590,23 @@ function renderAdminTab(tab){
   }
 }
 
-// The admin's choice when ending a client who has a SUMIT standing order: also cancel the
-// order, or keep it. Resolves 'cancel', 'keep', or null (back, nothing changes).
-function askEndChoice(name){
-  return new Promise(resolve=>{
-    const ov=document.createElement('div');
-    ov.setAttribute('style','position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;');
-    ov.innerHTML='<div style="background:#fff;border-radius:12px;padding:20px;max-width:420px;width:100%;direction:rtl;" role="dialog" aria-modal="true">'
-      +'<div style="font-size:15px;font-weight:600;margin-bottom:8px;">סיום המנוי של '+esc(name)+'</div>'
-      +'<div style="font-size:13px;color:#555;line-height:1.7;margin-bottom:14px;">הגישה לכלי תיחסם מיד. ללקוח יש הוראת קבע ב־SUMIT: מה לעשות בה?</div>'
-      +'<button class="action-btn" style="margin-top:0;background:var(--danger);color:#fff;" data-c="cancel">סיים מנוי ובטל את הוראת הקבע</button>'
-      +'<div style="font-size:11px;color:#888;margin:4px 0 10px;">לא יבוצעו חיובים נוספים.</div>'
-      +'<button class="action-btn" style="margin-top:0;" data-c="keep">סיים מנוי בלבד, הוראת הקבע נשארת</button>'
-      +'<div style="font-size:11px;color:#888;margin:4px 0 10px;">החיובים ימשיכו. אם יתבצע חיוב חדש, הגישה תיפתח מחדש.</div>'
-      +'<button class="btn-out" style="width:100%;" data-c="">חזרה</button>'
-      +'</div>';
-    ov.addEventListener('click',e=>{
-      const b=e.target.closest('[data-c]');
-      if(!b&&e.target!==ov)return;
-      document.body.removeChild(ov);
-      resolve(b&&b.dataset.c?b.dataset.c:null);
-    });
-    document.body.appendChild(ov);
-  });
-}
+// "סיים מנוי" has something to do: the client has access, or still has a SUMIT standing order
+// that was not cancelled (e.g. access ended after a failed charge). Otherwise grayed out.
+function canEnd(p){return hasAccessP(p)||(!!p.sumitCustomerId&&!p.cancelledAt);}
 
-// "סיים מנוי" (list and client card). For a client with a SUMIT standing order the admin
-// chooses whether to cancel it too; the billing function cancels it (first, so a SUMIT
-// failure changes nothing) only if chosen. A client managed by hand only gets today's end
-// date. Returns true when ended.
+// "סיים מנוי" (list and client card): one confirmation, then the subscription ends and, for a
+// client with a SUMIT standing order, the order is cancelled (by the billing function, first,
+// so a SUMIT failure changes nothing). A client managed by hand only gets today's end date.
+// Returns true when ended.
 async function adminEndSubscription(id){
-  const p=state.profiles[id];if(!p)return false;
+  const p=state.profiles[id];if(!p||!canEnd(p))return false;
   const billed=!!p.sumitCustomerId;
-  let cancelOrder=false;
-  if(billed){
-    const choice=await askEndChoice(p.name);
-    if(!choice)return false;
-    cancelOrder=choice==='cancel';
-  }else if(!confirm('לסיים את המנוי של '+p.name+' עכשיו?\nהגישה לכלי תיחסם מיד.'))return false;
+  if(!confirm(billed
+    ?'המנוי של '+p.name+' יסתיים והוראת הקבע תבוטל.\nלאשר?'
+    :'המנוי של '+p.name+' יסתיים.\nלאשר?'))return false;
   try{
     if(billed){
-      const res=await billing('admin_end',{clientId:id,cancelOrder});
+      const res=await billing('admin_end',{clientId:id});
       if(!res.ok)throw new Error(res.error||'failed');
       p.subscriptionEnd=res.endedAt;p.active=false;p.cancelledAt=res.cancelledAt||p.cancelledAt;
     }else{
@@ -639,7 +617,7 @@ async function adminEndSubscription(id){
     return true;
   }catch(e){
     console.warn('end subscription:',e);
-    alert(cancelOrder
+    alert(billed
       ?'סיום המנוי נכשל, ולא שונה דבר. ייתכן שהוראת הקבע ב־SUMIT עדיין פעילה. נסה שוב, או בטל אותה ישירות ב־SUMIT.'
       :'סיום המנוי נכשל, ולא שונה דבר. נסה שוב.');
     return false;
@@ -763,7 +741,9 @@ function renderClientAdminTab(tab){
       +'<button class="action-btn" id="ca-save-btn">שמור שינויים</button>'
       // Danger zone
       +'<div style="margin-top:16px;padding-top:16px;border-top:1px solid #eee;display:flex;gap:8px;flex-wrap:wrap;">'
-      +'<button class="btn-red" id="ca-expire-btn">סיים מנוי עכשיו</button>'
+      +(canEnd(p)
+        ?'<button class="btn-red" id="ca-expire-btn">סיים מנוי עכשיו</button>'
+        :'<button class="btn-red" id="ca-expire-btn" disabled title="המנוי כבר הסתיים" style="border-color:#ddd;color:#bbb;background:#f5f5f5;cursor:not-allowed;">המנוי הסתיים</button>')
       +'<button class="btn-red" id="ca-del-btn">מחק לקוח</button>'
       +'</div>'
       +'</div>';
